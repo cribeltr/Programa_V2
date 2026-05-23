@@ -2412,6 +2412,32 @@ function applyInconsistencia(i) {
 /* ============================================================================
    19. IMPORTAR Y EXPORTAR EXCEL
    ============================================================================ */
+
+// Lectura tolerante de hojas: detecta la fila de cabecera automáticamente
+// buscando una fila que contenga celdas con "inventario" y "equipo".
+function readSheetSmart(sheet) {
+  const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+  let headerRow = -1;
+  for (let i = 0; i < Math.min(15, aoa.length); i++) {
+    const cells = (aoa[i] || []).map(c => String(c||"").toLowerCase());
+    if (cells.some(c => c.includes("inventario")) && cells.some(c => c.includes("equipo"))) {
+      headerRow = i; break;
+    }
+  }
+  if (headerRow < 0) {
+    // fallback: primera fila no vacía
+    headerRow = aoa.findIndex(r => (r || []).some(c => String(c||"").trim() !== ""));
+    if (headerRow < 0) return { rows: [], headers: [], aoa, headerRow: -1 };
+  }
+  const headers = (aoa[headerRow] || []).map(h => String(h||"").trim());
+  const rows = aoa.slice(headerRow + 1).map(r => {
+    const obj = {};
+    headers.forEach((h, i) => { obj[h] = r[i] !== undefined ? r[i] : ""; });
+    return obj;
+  });
+  return { rows, headers, aoa, headerRow };
+}
+
 function importExcel(file) {
   const reader = new FileReader();
   reader.onload = (e) => {
@@ -2420,15 +2446,33 @@ function importExcel(file) {
       const sheetPMP = wb.Sheets["PMP_2026"] || wb.Sheets[Object.keys(wb.Sheets).find(n => /PMP/i.test(n))];
       const sheetReg = wb.Sheets["Registro_MP-2026"] || wb.Sheets[Object.keys(wb.Sheets).find(n => /Registro/i.test(n))];
       if (!sheetPMP) { toast("Hoja PMP_2026 no encontrada en el archivo", "error"); return; }
-      const pmpRows = XLSX.utils.sheet_to_json(sheetPMP, { defval: "" });
-      const regRows = sheetReg ? XLSX.utils.sheet_to_json(sheetReg, { defval: "", header: 1 }) : null;
 
-      processImport(pmpRows, regRows);
+      const { rows: pmpRows, headers: pmpHeaders } = readSheetSmart(sheetPMP);
+      const regAoa = sheetReg ? XLSX.utils.sheet_to_json(sheetReg, { defval: "", header: 1 }) : null;
+
+      console.log("[Importar] PMP_2026 cabeceras:", pmpHeaders);
+      console.log("[Importar] PMP_2026 filas:", pmpRows.length);
+
+      if (pmpRows.length === 0) {
+        toast("No se detectaron filas de datos en PMP_2026", "warning");
+        return;
+      }
+
+      const wasEmpty = state.equipos.length === 0;
+      const counts = processImport(pmpRows, regAoa, wasEmpty);
       state.meta.lastImported = new Date().toISOString();
       markDirty();
-      toast(`Maestro cargado: ${state.inconsistencias.filter(i=>i.estado==="pendiente").length} inconsistencias detectadas`, "success", 4500);
-      renderNav();
-      navigate("reconciliacion");
+
+      if (wasEmpty) {
+        toast(`Maestro cargado: ${counts.creados} equipos importados`, "success", 5000);
+        renderNav();
+        navigate("inventario");
+      } else {
+        const pend = state.inconsistencias.filter(i=>i.estado==="pendiente").length;
+        toast(`Maestro cargado: ${pend} inconsistencia${pend===1?"":"s"} detectada${pend===1?"":"s"}`, "success", 4500);
+        renderNav();
+        navigate(pend ? "reconciliacion" : "inventario");
+      }
     } catch (err) {
       console.error(err);
       toast("Error leyendo archivo: " + err.message, "error");
@@ -2437,12 +2481,31 @@ function importExcel(file) {
   reader.readAsArrayBuffer(file);
 }
 
-function processImport(pmpRows, regRowsRaw) {
+// processImport
+//   bulk=true  → la app estaba vacía: poblar state.equipos directamente, sin generar inconsistencias.
+//   bulk=false → reconciliar: generar inconsistencias para que el encargado decida.
+function processImport(pmpRows, regRowsRaw, bulk) {
   const incs = [];
-  // Mapeo de columnas esperadas (case-insensitive)
+  let creados = 0;
+  // Mapeo de columnas esperadas (case-insensitive, normaliza acentos y signos)
+  function norm(s) {
+    return String(s||"")
+      .toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/[°º.\s_]+/g, "")
+      .trim();
+  }
   function col(row, ...names) {
+    const keys = Object.keys(row);
     for (const n of names) {
-      const k = Object.keys(row).find(k => k.toLowerCase() === n.toLowerCase());
+      const target = norm(n);
+      const k = keys.find(k => norm(k) === target);
+      if (k !== undefined) return row[k];
+    }
+    // Fallback: includes
+    for (const n of names) {
+      const target = norm(n);
+      const k = keys.find(k => norm(k).includes(target));
       if (k !== undefined) return row[k];
     }
     return "";
@@ -2453,13 +2516,13 @@ function processImport(pmpRows, regRowsRaw) {
   const seenInv = new Set();
 
   pmpRows.forEach((row, idx) => {
-    const inv = String(col(row, "N° Inventario", "N Inventario", "NInventario") || "").trim();
+    const inv = String(col(row, "N° Inventario", "N Inventario", "NInventario", "Inventario") || "").trim();
     if (!inv) return; // slot vacío
     seenInv.add(inv);
     let eq = byInv[inv];
     const fields = {
       ID: col(row, "ID"),
-      NCarpeta: col(row, "N° Carpeta", "NCarpeta"),
+      NCarpeta: col(row, "N° Carpeta", "NCarpeta", "Carpeta"),
       NInventario: inv,
       Equipo: col(row, "Equipo"),
       Servicio: col(row, "Servicio"),
@@ -2472,13 +2535,13 @@ function processImport(pmpRows, regRowsRaw) {
       AnoInstalacion: col(row, "Año Instalación", "Ano Instalacion", "AnoInstalacion"),
       VidaUtilResidual: col(row, "Vida Útil Residual", "VidaUtilResidual"),
       Clasificacion: col(row, "Clasificación", "Clasificacion"),
-      ENUBaja: col(row, "ENU/Baja", "ENUBaja"),
+      ENUBaja: col(row, "ENU/Baja", "ENUBaja", "ENU Baja"),
       Observacion: col(row, "Observación", "Observacion"),
       FrecuenciaMP: col(row, "Frecuencia MP", "FrecuenciaMP"),
       ResponsableMP: col(row, "Responsable MP", "ResponsableMP"),
     };
     if (!eq) {
-      // Equipo no presente en app → propuesta de creación
+      // Equipo no presente en app → crear
       const nuevo = {
         _id: uid(),
         ...fields,
@@ -2487,16 +2550,21 @@ function processImport(pmpRows, regRowsRaw) {
         programacion: {}, resultado: {},
       };
       MESES.forEach(m => nuevo.programacion[m] = String(col(row, m)||"").trim().toUpperCase());
-      incs.push({
-        _id: uid(), tipo: "equipo_no_app",
-        campo: "Equipo nuevo",
-        equipo_id: nuevo._id, equipo_label: `${inv} · ${nuevo.Equipo}`,
-        app: "(no existe)", excel: `${inv} · ${nuevo.Equipo}`,
-        excel_obj: nuevo,
-        estado: "pendiente"
-      });
+      if (bulk) {
+        state.equipos.push(nuevo);
+        creados++;
+      } else {
+        incs.push({
+          _id: uid(), tipo: "equipo_no_app",
+          campo: "Equipo nuevo",
+          equipo_id: nuevo._id, equipo_label: `${inv} · ${nuevo.Equipo}`,
+          app: "(no existe)", excel: `${inv} · ${nuevo.Equipo}`,
+          excel_obj: nuevo,
+          estado: "pendiente"
+        });
+      }
       byInv[inv] = nuevo;
-    } else {
+    } else if (!bulk) {
       // comparar identificación
       ["NCarpeta","Equipo","Servicio","Unidad","Ubicacion","Procedencia","Marca","Modelo","Serie","AnoInstalacion","VidaUtilResidual","Clasificacion","FrecuenciaMP","ResponsableMP"].forEach(k => {
         if (String(eq[k]||"").trim() !== String(fields[k]||"").trim()) {
@@ -2523,18 +2591,20 @@ function processImport(pmpRows, regRowsRaw) {
     }
   });
 
-  // Equipos en app que no aparecen en el Excel
-  state.equipos.forEach(eq => {
-    if (eq.NInventario && !seenInv.has(String(eq.NInventario).trim())) {
-      incs.push({
-        _id: uid(), tipo: "equipo_no_excel",
-        campo: "Equipo ausente del Excel",
-        equipo_id: eq._id,
-        app: `${eq.NInventario} · ${eq.Equipo}`, excel: "(no presente)",
-        estado: "pendiente"
-      });
-    }
-  });
+  // Equipos en app que no aparecen en el Excel (solo en modo reconciliación)
+  if (!bulk) {
+    state.equipos.forEach(eq => {
+      if (eq.NInventario && !seenInv.has(String(eq.NInventario).trim())) {
+        incs.push({
+          _id: uid(), tipo: "equipo_no_excel",
+          campo: "Equipo ausente del Excel",
+          equipo_id: eq._id,
+          app: `${eq.NInventario} · ${eq.Equipo}`, excel: "(no presente)",
+          estado: "pendiente"
+        });
+      }
+    });
+  }
 
   // Procesar Registro_MP-2026 (R por mes) si está disponible.
   // Asumimos: fila 1 = nombres de mes (12 grupos), fila 2 = "P","R" alternados después de cols identificación.
@@ -2579,10 +2649,17 @@ function processImport(pmpRows, regRowsRaw) {
           const excelR = String(row[mc.r]||"").trim();
           const appR = String(eq.resultado[m]?.r||"").trim();
           if (excelR !== appR) {
-            incs.push({
-              _id: uid(), tipo: "resultado", campo: m, equipo_id: eq._id,
-              app: appR, excel: excelR, estado: "pendiente"
-            });
+            if (bulk) {
+              if (excelR) {
+                eq.resultado[m] = eq.resultado[m] || { p: eq.programacion[m]||"" };
+                eq.resultado[m].r = excelR;
+              }
+            } else {
+              incs.push({
+                _id: uid(), tipo: "resultado", campo: m, equipo_id: eq._id,
+                app: appR, excel: excelR, estado: "pendiente"
+              });
+            }
           }
         });
       }
@@ -2591,6 +2668,7 @@ function processImport(pmpRows, regRowsRaw) {
 
   // Mantener inconsistencias resueltas previas, agregar nuevas pendientes (deduplicar)
   state.inconsistencias = state.inconsistencias.filter(i => i.estado !== "pendiente").concat(incs);
+  return { creados, inconsistencias: incs.length };
 }
 
 function exportExcel() {
