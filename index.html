@@ -1,0 +1,2913 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Gestión MP — SEC Hospital HHA</title>
+<meta name="viewport" content="width=1280">
+<!--
+  Aplicación de gestión de Mantenimiento Preventivo (MP) — SEC HHHA.
+  Archivo único, sin backend. Persistencia en localStorage + import/export .xlsx (SheetJS).
+
+  Supuestos relevantes documentados en el código:
+   * Exportación de Registro_MP-2026: encabezado de dos filas con sub-columnas P|R por mes,
+     SIN celdas combinadas reales (encabezado plano "Ene P", "Ene R", etc. en la fila 2).
+     Esto preserva la legibilidad para auditoría sin requerir merges que dificultan el
+     re-procesado por SheetJS. La fila 1 contiene los nombres de mes centrados textualmente.
+   * Demostración: equipo con estado "Demostración" no se programa para MP.
+   * C4 (préstamo): se conserva el estado anterior al préstamo en un flag y al registrar
+     reintegro se restaura. La causal queda registrada en R del mes original.
+   * Inconsistencias: se ordenan por gravedad (datos identificación > programación > resultado > estado).
+-->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<style>
+/* ============================================================
+   Variables y reset
+   ============================================================ */
+:root {
+  --c-bg: #f4f6f8;
+  --c-bg-alt: #ffffff;
+  --c-bg-soft: #eef2f5;
+  --c-border: #d8e0e6;
+  --c-border-strong: #b5c2cb;
+  --c-text: #1f2933;
+  --c-text-soft: #52606d;
+  --c-text-mute: #7b8794;
+  --c-primary: #14687a;
+  --c-primary-soft: #d5e9ee;
+  --c-primary-hover: #0f5260;
+  --c-accent: #2c8aa3;
+  --c-success: #1f8a5b;
+  --c-success-bg: #d8f0e3;
+  --c-warning: #b3791b;
+  --c-warning-bg: #fdecd0;
+  --c-danger: #b8332a;
+  --c-danger-bg: #f7d8d4;
+  --c-neutral: #5f6c75;
+  --c-neutral-bg: #e3e7ea;
+  --c-info: #1f5fa8;
+  --c-info-bg: #d8e4f5;
+  --c-shadow: 0 1px 2px rgba(0,0,0,.06), 0 2px 8px rgba(0,0,0,.04);
+  --c-shadow-strong: 0 4px 18px rgba(0,0,0,.12);
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 10px;
+  --font: "Inter", "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+body.dark {
+  --c-bg: #161b20;
+  --c-bg-alt: #1e252c;
+  --c-bg-soft: #232b33;
+  --c-border: #2f3942;
+  --c-border-strong: #44525e;
+  --c-text: #e4ecf2;
+  --c-text-soft: #b5c2cb;
+  --c-text-mute: #7b8794;
+  --c-primary: #58c4d9;
+  --c-primary-soft: #1d3a44;
+  --c-primary-hover: #7ed5e4;
+  --c-accent: #58c4d9;
+  --c-shadow: 0 1px 2px rgba(0,0,0,.4), 0 2px 8px rgba(0,0,0,.25);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; }
+body {
+  font-family: var(--font);
+  font-size: 13px;
+  color: var(--c-text);
+  background: var(--c-bg);
+  -webkit-font-smoothing: antialiased;
+  line-height: 1.4;
+}
+button { font-family: inherit; font-size: inherit; cursor: pointer; }
+input, select, textarea { font-family: inherit; font-size: inherit; color: var(--c-text); }
+a { color: var(--c-primary); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ============================================================
+   Layout principal
+   ============================================================ */
+#app {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  grid-template-rows: 52px 1fr;
+  grid-template-areas: "sidebar topbar" "sidebar main";
+  height: 100vh;
+}
+.sidebar {
+  grid-area: sidebar;
+  background: linear-gradient(180deg, #0f5260, #14687a);
+  color: #e4f0f3;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+.sidebar-brand {
+  padding: 14px 18px;
+  border-bottom: 1px solid rgba(255,255,255,.08);
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: .2px;
+}
+.sidebar-brand small { display: block; opacity: .7; font-weight: 400; margin-top: 2px; font-size: 11px; }
+.sidebar nav { padding: 8px 0; flex: 1; }
+.sidebar nav button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  color: #d6e4e8;
+  text-align: left;
+  padding: 9px 18px;
+  font-size: 13px;
+  border-left: 3px solid transparent;
+  transition: background .12s;
+}
+.sidebar nav button:hover { background: rgba(255,255,255,.06); color: #fff; }
+.sidebar nav button.active {
+  background: rgba(255,255,255,.1);
+  border-left-color: #58c4d9;
+  color: #fff;
+  font-weight: 600;
+}
+.sidebar nav button .badge {
+  margin-left: auto;
+  background: #c43e35;
+  color: #fff;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 9px;
+  font-weight: 600;
+}
+.sidebar-foot { padding: 10px 18px; font-size: 11px; color: rgba(255,255,255,.5); border-top: 1px solid rgba(255,255,255,.08); }
+.sidebar-foot button { background: transparent; border: 1px solid rgba(255,255,255,.2); color: #d6e4e8; padding: 4px 8px; border-radius: 4px; font-size: 11px; margin-top: 6px; }
+
+.topbar {
+  grid-area: topbar;
+  background: var(--c-bg-alt);
+  border-bottom: 1px solid var(--c-border);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  gap: 10px;
+}
+.topbar h2 { margin: 0; font-size: 15px; font-weight: 600; color: var(--c-text); }
+.topbar .spacer { flex: 1; }
+.topbar .save-indicator { font-size: 11px; color: var(--c-text-mute); display: flex; align-items: center; gap: 6px; }
+.topbar .save-indicator .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c-success); }
+.topbar .save-indicator.dirty .dot { background: var(--c-warning); }
+.btn {
+  background: var(--c-bg-alt);
+  border: 1px solid var(--c-border-strong);
+  color: var(--c-text);
+  padding: 6px 12px;
+  border-radius: var(--r-md);
+  font-size: 12px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background .12s, border-color .12s;
+}
+.btn:hover { background: var(--c-bg-soft); border-color: var(--c-text-mute); }
+.btn-primary { background: var(--c-primary); border-color: var(--c-primary); color: #fff; }
+.btn-primary:hover { background: var(--c-primary-hover); border-color: var(--c-primary-hover); }
+.btn-danger { background: var(--c-danger); border-color: var(--c-danger); color: #fff; }
+.btn-danger:hover { background: #931f1a; }
+.btn-soft { background: var(--c-bg-soft); border-color: var(--c-border); }
+.btn-sm { padding: 3px 8px; font-size: 11px; }
+.btn-link { background: transparent; border: 0; color: var(--c-primary); padding: 0; }
+
+main {
+  grid-area: main;
+  overflow: auto;
+  padding: 18px 22px;
+}
+
+/* ============================================================
+   Componentes generales
+   ============================================================ */
+.view-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.view-header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+.view-header p { margin: 0; color: var(--c-text-mute); font-size: 12px; }
+.view-tools { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+
+.card {
+  background: var(--c-bg-alt);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--c-shadow);
+}
+.card-header { padding: 12px 16px; border-bottom: 1px solid var(--c-border); font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 8px; }
+.card-body { padding: 14px 16px; }
+
+.tag {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .3px;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+}
+.tag-success { background: var(--c-success-bg); color: var(--c-success); }
+.tag-warning { background: var(--c-warning-bg); color: var(--c-warning); }
+.tag-danger { background: var(--c-danger-bg); color: var(--c-danger); }
+.tag-info { background: var(--c-info-bg); color: var(--c-info); }
+.tag-neutral { background: var(--c-neutral-bg); color: var(--c-neutral); }
+
+/* Códigos de programación / registro */
+.code {
+  display: inline-block;
+  min-width: 22px;
+  text-align: center;
+  font-weight: 600;
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+}
+.code-X  { background: #d5e9ee; color: #0f5260; border-color: #b3d6dd; }
+.code-R  { background: #fdecd0; color: #8a5b14; border-color: #f0d39c; }
+.code-RA { background: #f0e3f5; color: #6e3a87; border-color: #d9c0e3; }
+.code-PM { background: #d8e4f5; color: #1f5fa8; border-color: #b4cae6; }
+.code-Si { background: #d8f0e3; color: #156b46; border-color: #aee0c6; }
+.code-FS { background: #f7d8d4; color: #931f1a; border-color: #eab4ae; }
+.code-Baja { background: #2f3942; color: #fff; border-color: #1f262d; }
+.code-NU { background: #e3e7ea; color: #44525e; border-color: #c7d0d6; }
+.code-C1, .code-C5, .code-C6, .code-C7, .code-C8 { background: #fdecd0; color: #8a5b14; border-color: #f0d39c; }
+.code-C2 { background: #f7d8d4; color: #931f1a; border-color: #eab4ae; }
+.code-C3 { background: #e8d0f0; color: #6e1f87; border-color: #d6b0e3; }
+.code-C4 { background: #d8e4f5; color: #1f5fa8; border-color: #b4cae6; }
+
+.estado-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.estado-Operativo        { background: #d8f0e3; color: #156b46; }
+.estado-No-operativo     { background: #f7d8d4; color: #931f1a; }
+.estado-Servicio-técnico { background: #fdecd0; color: #8a5b14; }
+.estado-Baja             { background: #2f3942; color: #fff; }
+.estado-Demostración     { background: #e8d0f0; color: #6e1f87; }
+
+/* ============================================================
+   Tablas
+   ============================================================ */
+.table-wrap {
+  position: relative;
+  background: var(--c-bg-alt);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  overflow: auto;
+  max-height: calc(100vh - 200px);
+}
+table.data {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: max-content;
+  min-width: 100%;
+  font-size: 12px;
+}
+table.data thead th {
+  position: sticky;
+  top: 0;
+  background: var(--c-bg-soft);
+  color: var(--c-text-soft);
+  font-weight: 600;
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--c-border-strong);
+  border-right: 1px solid var(--c-border);
+  white-space: nowrap;
+  z-index: 3;
+  user-select: none;
+}
+table.data thead th .col-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+table.data thead th .filter-btn {
+  background: transparent;
+  border: 0;
+  color: var(--c-text-mute);
+  padding: 0 2px;
+  font-size: 10px;
+  cursor: pointer;
+  border-radius: 2px;
+}
+table.data thead th .filter-btn:hover { background: var(--c-border); color: var(--c-text); }
+table.data thead th .filter-btn.active { background: var(--c-primary); color: #fff; }
+table.data tbody td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--c-border);
+  border-right: 1px solid var(--c-border);
+  white-space: nowrap;
+  background: var(--c-bg-alt);
+}
+table.data tbody tr:hover td { background: #f0f6f7; }
+body.dark table.data tbody tr:hover td { background: #2a333b; }
+table.data tbody tr.clickable { cursor: pointer; }
+table.data .freeze-col {
+  position: sticky;
+  background: var(--c-bg-alt);
+  z-index: 2;
+  border-right: 1px solid var(--c-border-strong);
+}
+table.data thead .freeze-col { z-index: 4; background: var(--c-bg-soft); }
+table.data tbody tr:hover .freeze-col { background: #f0f6f7; }
+body.dark table.data tbody tr:hover .freeze-col { background: #2a333b; }
+table.data th.month, table.data td.month { text-align: center; min-width: 42px; }
+table.data th.month-pair { text-align: center; }
+table.data tfoot td {
+  padding: 6px 8px;
+  background: var(--c-bg-soft);
+  color: var(--c-text-mute);
+  font-size: 11px;
+}
+
+/* ============================================================
+   Filtro tipo Excel (dropdown)
+   ============================================================ */
+.filter-popup {
+  position: fixed;
+  z-index: 10000;
+  background: var(--c-bg-alt);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--c-shadow-strong);
+  width: 260px;
+  font-size: 12px;
+  padding: 8px;
+  max-height: 380px;
+  display: flex;
+  flex-direction: column;
+}
+.filter-popup input[type="text"] {
+  width: 100%;
+  padding: 5px 7px;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-sm);
+  margin-bottom: 6px;
+}
+.filter-popup .values {
+  flex: 1;
+  overflow-y: auto;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  padding: 4px 6px;
+  max-height: 220px;
+}
+.filter-popup .values label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  cursor: pointer;
+}
+.filter-popup .values label:hover { background: var(--c-bg-soft); }
+.filter-popup .actions { display: flex; justify-content: space-between; gap: 6px; margin-top: 8px; }
+.filter-popup .actions button { flex: 1; }
+
+/* ============================================================
+   Modales
+   ============================================================ */
+.modal-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(15,25,35,.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9000;
+  padding: 24px;
+}
+.modal {
+  background: var(--c-bg-alt);
+  border-radius: var(--r-lg);
+  box-shadow: var(--c-shadow-strong);
+  max-width: 95vw;
+  max-height: 95vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.modal-sm { width: 480px; }
+.modal-md { width: 680px; }
+.modal-lg { width: 980px; }
+.modal-xl { width: 1200px; }
+.modal-fullscreen { width: 95vw; height: 95vh; }
+.modal-header {
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--c-border);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.modal-header h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.modal-header .close { background: transparent; border: 0; font-size: 18px; color: var(--c-text-mute); margin-left: auto; padding: 4px 8px; border-radius: 4px; }
+.modal-header .close:hover { background: var(--c-bg-soft); color: var(--c-text); }
+.modal-body { padding: 16px 18px; overflow-y: auto; flex: 1; }
+.modal-footer { padding: 12px 18px; border-top: 1px solid var(--c-border); display: flex; justify-content: flex-end; gap: 8px; background: var(--c-bg-soft); }
+
+/* Forms */
+.form-row { display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+.form-field { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 180px; }
+.form-field label { font-size: 11px; font-weight: 600; color: var(--c-text-soft); text-transform: uppercase; letter-spacing: .3px; }
+.form-field input, .form-field select, .form-field textarea {
+  padding: 6px 9px;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-sm);
+  background: var(--c-bg-alt);
+  color: var(--c-text);
+}
+.form-field input:focus, .form-field select:focus, .form-field textarea:focus {
+  outline: none;
+  border-color: var(--c-primary);
+  box-shadow: 0 0 0 2px var(--c-primary-soft);
+}
+.form-field textarea { min-height: 60px; resize: vertical; font-family: inherit; }
+.form-field.required label::after { content: " *"; color: var(--c-danger); }
+.radio-row { display: flex; gap: 14px; }
+.radio-row label { display: flex; align-items: center; gap: 5px; cursor: pointer; font-weight: 400; text-transform: none; letter-spacing: 0; }
+
+/* ============================================================
+   Dashboard
+   ============================================================ */
+.kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
+.kpi {
+  background: var(--c-bg-alt);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-lg);
+  padding: 14px 16px;
+  box-shadow: var(--c-shadow);
+}
+.kpi .label { font-size: 11px; color: var(--c-text-mute); text-transform: uppercase; letter-spacing: .3px; font-weight: 600; }
+.kpi .value { font-size: 26px; font-weight: 700; color: var(--c-text); margin-top: 4px; }
+.kpi .sub { font-size: 11px; color: var(--c-text-mute); margin-top: 2px; }
+.kpi.accent .value { color: var(--c-primary); }
+.kpi.warning .value { color: var(--c-warning); }
+.kpi.danger .value { color: var(--c-danger); }
+.kpi.success .value { color: var(--c-success); }
+
+.dash-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.progress-bar { background: var(--c-bg-soft); border-radius: 4px; height: 8px; overflow: hidden; margin-top: 6px; }
+.progress-bar > div { height: 100%; background: var(--c-success); transition: width .3s; }
+
+/* Ficha del equipo */
+.ficha-header {
+  background: linear-gradient(135deg, #14687a, #0f5260);
+  color: #fff;
+  padding: 16px 22px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 14px;
+}
+.ficha-header h2 { margin: 0 0 4px 0; font-size: 18px; font-weight: 600; }
+.ficha-header .meta { font-size: 12px; opacity: .85; display: flex; flex-wrap: wrap; gap: 14px; }
+.ficha-header .meta span strong { font-weight: 600; opacity: .7; margin-right: 4px; text-transform: uppercase; font-size: 10px; letter-spacing: .3px; }
+.ficha-actions { display: flex; gap: 8px; align-items: flex-start; }
+.ficha-actions .btn { background: rgba(255,255,255,.15); border-color: rgba(255,255,255,.3); color: #fff; }
+.ficha-actions .btn:hover { background: rgba(255,255,255,.25); }
+.ficha-body { padding: 16px 22px; overflow-y: auto; flex: 1; display: grid; grid-template-columns: 1fr; gap: 16px; }
+.ficha-section { background: var(--c-bg-alt); border: 1px solid var(--c-border); border-radius: var(--r-md); }
+.ficha-section h4 { margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--c-border); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; color: var(--c-text-soft); }
+.ficha-section .body { padding: 12px 14px; }
+
+.month-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 6px; }
+.month-cell { border: 1px solid var(--c-border); border-radius: 4px; padding: 6px; text-align: center; background: var(--c-bg-soft); font-size: 11px; }
+.month-cell .mname { font-weight: 600; color: var(--c-text-mute); font-size: 10px; text-transform: uppercase; }
+.month-cell .codes { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; align-items: center; }
+.month-cell input { width: 100%; text-align: center; padding: 2px; border: 1px solid var(--c-border); border-radius: 3px; font-size: 11px; text-transform: uppercase; }
+
+.bitacora-entry { border-left: 3px solid var(--c-primary); padding: 6px 10px; margin-bottom: 8px; background: var(--c-bg-soft); border-radius: 0 4px 4px 0; }
+.bitacora-entry .ts { font-size: 10.5px; color: var(--c-text-mute); }
+.checklist-item { display: flex; gap: 8px; padding: 4px 0; align-items: center; }
+.checklist-item input[type="checkbox"] { margin: 0; }
+.checklist-item .text { flex: 1; }
+.checklist-item.done .text { text-decoration: line-through; color: var(--c-text-mute); }
+
+/* Tooltip */
+[data-tip] { position: relative; }
+[data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%) translateY(-4px);
+  background: #1f2933;
+  color: #fff;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  white-space: nowrap;
+  z-index: 9999;
+  pointer-events: none;
+  box-shadow: 0 2px 6px rgba(0,0,0,.2);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* Toast */
+.toast-host { position: fixed; bottom: 16px; right: 16px; z-index: 11000; display: flex; flex-direction: column; gap: 8px; }
+.toast {
+  background: #1f2933;
+  color: #fff;
+  padding: 10px 14px;
+  border-radius: var(--r-md);
+  box-shadow: var(--c-shadow-strong);
+  font-size: 12px;
+  min-width: 240px;
+  max-width: 360px;
+  animation: slideIn .2s ease;
+}
+.toast.success { background: #1f8a5b; }
+.toast.error { background: #b8332a; }
+.toast.warning { background: #b3791b; }
+@keyframes slideIn { from { transform: translateX(20px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+/* Estado fila por urgencia */
+tr.urgent-low td { background: #fdf3e0 !important; }
+tr.urgent-mid td { background: #fde0c8 !important; }
+tr.urgent-high td { background: #f7d8d4 !important; }
+
+/* Tabs (inventario / ficha) */
+.tabs { display: flex; border-bottom: 1px solid var(--c-border); margin-bottom: 12px; }
+.tabs button { background: transparent; border: 0; padding: 8px 14px; font-size: 12px; color: var(--c-text-mute); border-bottom: 2px solid transparent; }
+.tabs button.active { color: var(--c-primary); border-bottom-color: var(--c-primary); font-weight: 600; }
+
+/* Toolbar de tabla (búsqueda) */
+.table-toolbar { display: flex; gap: 8px; align-items: center; padding: 8px 0; }
+.table-toolbar input.search { padding: 6px 10px; border: 1px solid var(--c-border-strong); border-radius: var(--r-sm); min-width: 280px; }
+.table-toolbar .count { color: var(--c-text-mute); font-size: 11.5px; }
+
+/* Sub-formulario ST destacado */
+.subform {
+  background: var(--c-warning-bg);
+  border: 1px dashed var(--c-warning);
+  border-radius: var(--r-md);
+  padding: 10px 12px;
+  margin-top: 8px;
+}
+.subform h5 { margin: 0 0 8px 0; font-size: 12px; color: var(--c-warning); }
+
+.empty-state { padding: 24px; text-align: center; color: var(--c-text-mute); font-size: 12px; }
+
+/* Switch / toggle (oscuro) */
+.switch { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--c-text-mute); }
+.switch input { margin: 0; }
+
+/* Confirmar */
+.confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* Tabla de PMP / Registro con many columnas: scroll horizontal */
+.legend { display: flex; gap: 10px; flex-wrap: wrap; font-size: 11px; color: var(--c-text-mute); padding: 6px 0; }
+.legend span.code { font-size: 10.5px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      SEC · HHHA
+      <small>Gestión de Mantenimiento Preventivo</small>
+    </div>
+    <nav id="nav"></nav>
+    <div class="sidebar-foot">
+      <div id="status-line">v1 · localStorage</div>
+      <button id="btn-dark">Modo oscuro</button>
+      <button id="btn-export-json">Respaldo JSON</button>
+      <button id="btn-reset" style="border-color: rgba(255,150,150,.35); color: #ffd0d0;">Reset</button>
+    </div>
+  </aside>
+
+  <header class="topbar">
+    <h2 id="view-title">Inicio</h2>
+    <div class="spacer"></div>
+    <input id="file-input" type="file" accept=".xlsx,.xlsm,.xls" style="display:none">
+    <button class="btn" id="btn-import"> Cargar maestro</button>
+    <button class="btn" id="btn-export"> Exportar maestro</button>
+    <div class="save-indicator" id="save-indicator">
+      <div class="dot"></div>
+      <span>Guardado</span>
+    </div>
+  </header>
+
+  <main id="view-container"></main>
+</div>
+
+<div id="modal-root"></div>
+<div class="toast-host" id="toast-host"></div>
+
+<script>
+/* ============================================================================
+   1. UTILIDADES GENÉRICAS
+   ============================================================================ */
+const MESES = ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"];
+const MESES_FULL = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
+const RESPONSABLES = [
+  "Carlos Bahamondes Seguel",
+  "Cristián Beltrán Oviedo",
+  "Cristina Rozas Urrutia",
+  "Daniel Díaz Neira",
+  "Ignacio Berner Bergara",
+  "Macarena Toledo",
+  "Marco Ulloa",
+  "Matías Soazo Garrido",
+  "Personal externo",
+  "Ricardo Matus Aroca",
+  "Tito Millapán Riquelme",
+];
+const ESTADOS_EQUIPO = ["Operativo","No operativo","Servicio técnico","Baja","Demostración"];
+const CODIGOS_P = ["X","R","RA","PM"];
+const CODIGOS_R = ["Si","C1","C2","C3","C4","C5","C6","C7","C8","FS","Baja","NU"];
+const CAUSALES_DESC = {
+  C1: "Imposibilidad de desocupar el equipo del paciente por indicación clínica",
+  C2: "Equipo en servicio técnico",
+  C3: "Equipo no operativo, a la espera de repuestos o accesorios",
+  C4: "Equipo en préstamo a otro hospital o institución",
+  C5: "No disponibilidad de horas hombre del funcionario SEC por alta carga laboral",
+  C6: "No disponibilidad de horas hombre del servicio técnico externo",
+  C7: "Ausencia justificada del funcionario SEC superior a 15 días",
+  C8: "Contingencia hospitalaria",
+};
+const CODIGOS_DESC = {
+  X: "MP programado",
+  R: "MP reprogramado",
+  RA: "Reprogramado del año anterior",
+  PM: "Puesta en marcha (equipo nuevo)",
+  Si: "MP realizado",
+  FS: "Fuera de servicio",
+  Baja: "Equipo dado de baja",
+  NU: "No ubicable",
+  ...CAUSALES_DESC,
+};
+
+const $ = (sel, ctx=document) => ctx.querySelector(sel);
+const $$ = (sel, ctx=document) => Array.from(ctx.querySelectorAll(sel));
+const uid = () => Math.random().toString(36).slice(2,10) + Date.now().toString(36).slice(-4);
+const escapeHtml = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+const today = () => new Date().toISOString().slice(0,10);
+const daysBetween = (a, b) => {
+  if (!a) return 0;
+  const d1 = new Date(a + "T00:00:00");
+  const d2 = b ? new Date(b + "T00:00:00") : new Date();
+  return Math.max(0, Math.floor((d2 - d1) / 86400000));
+};
+const formatDate = d => {
+  if (!d) return "";
+  const dt = new Date(d + "T00:00:00");
+  if (isNaN(dt)) return d;
+  return dt.toLocaleDateString("es-CL", { year:"numeric", month:"2-digit", day:"2-digit" });
+};
+
+function toast(msg, type="info", ms=2800) {
+  const host = $("#toast-host");
+  const el = document.createElement("div");
+  el.className = "toast " + (type || "");
+  el.textContent = msg;
+  host.appendChild(el);
+  setTimeout(() => { el.style.opacity = "0"; setTimeout(() => el.remove(), 250); }, ms);
+}
+
+/* ============================================================================
+   2. MODELO DE DATOS Y PERSISTENCIA
+   ============================================================================ */
+const STORAGE_KEY = "sec_hhha_mp_v1";
+let state = {
+  equipos: [],         // { _id, ID, NCarpeta, NInventario, Equipo, Servicio, Unidad, Ubicacion, Procedencia, Marca, Modelo, Serie, AnoInstalacion, VidaUtilResidual, Clasificacion, ENUBaja, Observacion, FrecuenciaMP, ResponsableMP, EstadoEquipo, EstadoAnterior, FechaEstado, programacion:{Ene:..}, resultado:{Ene:{p,r,fecha,ejecutor,estado,obs}} }
+  envios_st: [],       // { _id, equipo_id, n_envio, fecha_envio, solicitud, ejecutor_externo, responsable_interno, fecha_reintegro }
+  correctivos: [],     // { _id, equipo_id, fecha, ejecutor, falla, accion, repuestos, estado_final, observaciones }
+  pendientes: [],      // { _id, titulo, descripcion, fecha_compromiso, prioridad, responsable, equipo_id, estado, tareas:[{id,texto,done}], bitacora:[{ts,texto}], creado }
+  inconsistencias: [], // generadas tras cada carga del maestro
+  meta: { lastSaved: null, lastImported: null, ano: 2026 },
+};
+
+let dirty = false;
+function markDirty() {
+  dirty = true;
+  const ind = $("#save-indicator");
+  if (ind) { ind.classList.add("dirty"); ind.querySelector("span").textContent = "Sin guardar..."; }
+  scheduleSave();
+}
+let saveTimer = null;
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => save(), 600);
+}
+function save() {
+  state.meta.lastSaved = new Date().toISOString();
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    dirty = false;
+    const ind = $("#save-indicator");
+    if (ind) { ind.classList.remove("dirty"); ind.querySelector("span").textContent = "Guardado"; }
+  } catch (e) {
+    console.error("Error guardando:", e);
+    toast("Error al guardar en localStorage", "error");
+  }
+}
+function load() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      state = JSON.parse(raw);
+      // backfill: asegurar campos faltantes
+      state.inconsistencias = state.inconsistencias || [];
+      state.envios_st = state.envios_st || [];
+      state.correctivos = state.correctivos || [];
+      state.pendientes = state.pendientes || [];
+      state.meta = state.meta || { lastSaved: null, lastImported: null, ano: 2026 };
+      return true;
+    }
+  } catch (e) { console.error(e); }
+  return false;
+}
+
+/* ============================================================================
+   3. DATOS DE EJEMPLO PRECARGADOS
+   ============================================================================ */
+function seedData() {
+  const familias = [
+    { equipo: "Monitor multiparámetro", marca: "Mindray", modelos: ["uMEC15","BeneView T5","ePM 10"], freq: 6 },
+    { equipo: "Ventilador mecánico", marca: "Hamilton", modelos: ["G5","C3","T1"], freq: 4 },
+    { equipo: "Desfibrilador", marca: "Philips", modelos: ["HeartStart XL+","Tempus Pro"], freq: 6 },
+    { equipo: "Máquina de anestesia", marca: "Dräger", modelos: ["Fabius Plus","Atlan A350"], freq: 4 },
+    { equipo: "Incubadora neonatal", marca: "GE Healthcare", modelos: ["Giraffe OmniBed","Lullaby"], freq: 6 },
+    { equipo: "Máquina de diálisis", marca: "Fresenius", modelos: ["4008S","5008"], freq: 3 },
+  ];
+  const servicios = ["UCI Adulto","UCI Pediátrica","Pabellón","Urgencias","Neonatología","Medicina Interna","Cardiología","Hemodiálisis"];
+  const unidades = ["Sala 1","Sala 2","Pabellón A","Pabellón B","Box 1","Box 2","Cuna 1","Cuna 2","Puesto 1","Puesto 2"];
+
+  let counter = 1;
+  const equipos = [];
+  familias.forEach((f, fi) => {
+    const n = 5; // ~30 equipos
+    for (let i=0; i<n; i++) {
+      const modelo = f.modelos[i % f.modelos.length];
+      const servicio = servicios[(fi*2 + i) % servicios.length];
+      const eq = {
+        _id: uid(),
+        ID: counter,
+        NCarpeta: "C-" + String(2000 + counter),
+        NInventario: "INV-" + String(10000 + counter),
+        Equipo: f.equipo,
+        Servicio: servicio,
+        Unidad: unidades[(fi+i) % unidades.length],
+        Ubicacion: servicio + " · " + unidades[(fi+i) % unidades.length],
+        Procedencia: i % 3 === 0 ? "MINSAL" : "Hospital",
+        Marca: f.marca,
+        Modelo: modelo,
+        Serie: f.marca.slice(0,3).toUpperCase() + "-" + String(50000 + counter*7),
+        AnoInstalacion: 2018 + (counter % 7),
+        VidaUtilResidual: String(10 - (counter % 8)) + " años",
+        Clasificacion: i % 2 === 0 ? "Crítico" : "No crítico",
+        ENUBaja: "",
+        Observacion: "",
+        FrecuenciaMP: f.freq + " meses",
+        ResponsableMP: RESPONSABLES[counter % RESPONSABLES.length],
+        EstadoEquipo: "Operativo",
+        EstadoAnterior: null,
+        FechaEstado: null,
+        programacion: {},
+        resultado: {},
+      };
+      // Programación: cada `freq` meses
+      const offset = i % f.freq;
+      for (let m=0; m<12; m++) {
+        eq.programacion[MESES[m]] = ((m + offset) % f.freq === 0) ? "X" : "";
+      }
+      equipos.push(eq);
+      counter++;
+    }
+  });
+
+  // Cargar algunos resultados ya registrados (Ene, Feb, Mar, Abr)
+  equipos.forEach((eq, idx) => {
+    ["Ene","Feb","Mar","Abr"].forEach(m => {
+      if (eq.programacion[m] === "X") {
+        // Mayoría Si, algunos C2 / C5 / FS
+        let resultado = "Si";
+        if (idx % 11 === 3) resultado = "C2";
+        else if (idx % 13 === 5) resultado = "C5";
+        else if (idx % 17 === 7) resultado = "FS";
+        eq.resultado[m] = {
+          p: "X",
+          r: resultado,
+          fecha: "2026-0" + (MESES.indexOf(m)+1) + "-" + String(10 + (idx % 18)).padStart(2,"0"),
+          ejecutor: eq.ResponsableMP,
+          estado: resultado === "Si" ? "Operativo" : (resultado === "C2" ? "Servicio técnico" : "No operativo"),
+          obs: resultado === "Si" ? "MP completado sin novedades" : "",
+        };
+      }
+    });
+  });
+
+  // 2 equipos en ST y 2 no operativos
+  equipos[2].EstadoEquipo = "Servicio técnico";
+  equipos[2].FechaEstado = "2026-03-15";
+  equipos[2].EstadoAnterior = "Operativo";
+  equipos[8].EstadoEquipo = "Servicio técnico";
+  equipos[8].FechaEstado = "2026-04-22";
+  equipos[8].EstadoAnterior = "Operativo";
+  equipos[14].EstadoEquipo = "No operativo";
+  equipos[14].FechaEstado = "2026-04-02";
+  equipos[20].EstadoEquipo = "No operativo";
+  equipos[20].FechaEstado = "2026-05-01";
+
+  const envios_st = [
+    {
+      _id: uid(), equipo_id: equipos[2]._id,
+      n_envio: "ST-2026-0014", fecha_envio: "2026-03-15",
+      solicitud: "ST-014-2026", ejecutor_externo: "Servicio Técnico Mindray Chile",
+      responsable_interno: "Cristián Beltrán Oviedo", fecha_reintegro: null
+    },
+    {
+      _id: uid(), equipo_id: equipos[8]._id,
+      n_envio: "ST-2026-0021", fecha_envio: "2026-04-22",
+      solicitud: "ST-021-2026", ejecutor_externo: "Dräger Service",
+      responsable_interno: "Macarena Toledo", fecha_reintegro: null
+    },
+  ];
+
+  const correctivos = [
+    {
+      _id: uid(), equipo_id: equipos[5]._id,
+      fecha: "2026-02-18", ejecutor: "Daniel Díaz Neira",
+      falla: "Alarma de presión sin causa aparente",
+      accion: "Limpieza de sensor de presión y recalibración",
+      repuestos: "—",
+      estado_final: "Operativo",
+      observaciones: "Se solicita seguimiento en próxima MP"
+    },
+    {
+      _id: uid(), equipo_id: equipos[14]._id,
+      fecha: "2026-04-02", ejecutor: "Ignacio Berner Bergara",
+      falla: "Pantalla con líneas verticales",
+      accion: "Diagnóstico de placa LCD; requiere repuesto importado",
+      repuestos: "Display LCD (pendiente)",
+      estado_final: "No operativo",
+      observaciones: "Equipo retirado de servicio hasta arribo de repuesto."
+    },
+  ];
+
+  const pendientes = [
+    {
+      _id: uid(),
+      titulo: "Solicitar cotización repuesto sensor SpO2",
+      descripcion: "Para 4 monitores Mindray del servicio de UCI.",
+      fecha_compromiso: addDaysStr(today(), 2),
+      prioridad: "Alta",
+      responsable: "Cristián Beltrán Oviedo",
+      equipo_id: equipos[0]._id,
+      estado: "En curso",
+      tareas: [
+        { id: uid(), texto: "Pedir RFQ a 3 proveedores", done: true },
+        { id: uid(), texto: "Comparar cotizaciones", done: false },
+        { id: uid(), texto: "Emitir OC", done: false },
+      ],
+      bitacora: [
+        { ts: "2026-05-15T10:30:00Z", texto: "Solicitado RFQ a Mindray Chile y Equimédica." },
+      ],
+      creado: "2026-05-12T09:00:00Z"
+    },
+    {
+      _id: uid(),
+      titulo: "Seguimiento ST equipo INV-10003",
+      descripcion: "Llevamos más de 60 días con el equipo en servicio técnico externo.",
+      fecha_compromiso: addDaysStr(today(), -3),
+      prioridad: "Alta",
+      responsable: "Cristián Beltrán Oviedo",
+      equipo_id: equipos[2]._id,
+      estado: "Abierto",
+      tareas: [
+        { id: uid(), texto: "Llamar al proveedor", done: false },
+        { id: uid(), texto: "Solicitar informe de estado", done: false }
+      ],
+      bitacora: [],
+      creado: "2026-05-10T12:00:00Z"
+    },
+    {
+      _id: uid(),
+      titulo: "Coordinar capacitación uso de ventiladores G5",
+      descripcion: "Personal de UCI Adulto solicita refrescamiento.",
+      fecha_compromiso: addDaysStr(today(), 12),
+      prioridad: "Media",
+      responsable: "Macarena Toledo",
+      equipo_id: null,
+      estado: "Abierto",
+      tareas: [],
+      bitacora: [],
+      creado: today() + "T08:00:00Z"
+    },
+    {
+      _id: uid(),
+      titulo: "Actualizar inventario tras compras Q1",
+      descripcion: "Ingresar nuevos monitores recibidos en marzo (puesta en marcha).",
+      fecha_compromiso: addDaysStr(today(), 6),
+      prioridad: "Baja",
+      responsable: "Cristián Beltrán Oviedo",
+      equipo_id: null,
+      estado: "Abierto",
+      tareas: [
+        { id: uid(), texto: "Etiquetar equipos", done: false },
+        { id: uid(), texto: "Ingresar series y modelos", done: false },
+      ],
+      bitacora: [],
+      creado: today() + "T08:00:00Z"
+    },
+  ];
+
+  state.equipos = equipos;
+  state.envios_st = envios_st;
+  state.correctivos = correctivos;
+  state.pendientes = pendientes;
+}
+
+function addDaysStr(s, n) {
+  const d = new Date(s + "T00:00:00");
+  d.setDate(d.getDate() + n);
+  return d.toISOString().slice(0,10);
+}
+
+/* ============================================================================
+   4. ENRUTADOR / NAV
+   ============================================================================ */
+const VIEWS = [
+  { key: "inicio", label: "Inicio", icon: "▣" },
+  { key: "inventario", label: "Inventario", icon: "▦" },
+  { key: "pmp", label: "PMP 2026", icon: "▤" },
+  { key: "registro", label: "Registro MP 2026", icon: "▥" },
+  { key: "st", label: "Servicio Técnico", icon: "⚙" },
+  { key: "no_op", label: "No Operativos", icon: "⚠" },
+  { key: "pendientes", label: "Pendientes", icon: "✓" },
+  { key: "reconciliacion", label: "Reconciliación", icon: "↻" },
+];
+let currentView = "inicio";
+
+function renderNav() {
+  const nav = $("#nav");
+  nav.innerHTML = VIEWS.map(v => {
+    let badge = "";
+    if (v.key === "pendientes") {
+      const venc = state.pendientes.filter(p => p.estado !== "Cerrado" && daysBetween(p.fecha_compromiso, today()) > 0 && new Date(p.fecha_compromiso) < new Date(today())).length;
+      if (venc > 0) badge = `<span class="badge">${venc}</span>`;
+    }
+    if (v.key === "reconciliacion") {
+      const pend = state.inconsistencias.filter(i => i.estado === "pendiente").length;
+      if (pend > 0) badge = `<span class="badge">${pend}</span>`;
+    }
+    if (v.key === "st") {
+      const c = state.equipos.filter(e => e.EstadoEquipo === "Servicio técnico").length;
+      if (c > 0) badge = `<span class="badge" style="background:#b3791b">${c}</span>`;
+    }
+    if (v.key === "no_op") {
+      const c = state.equipos.filter(e => e.EstadoEquipo === "No operativo").length;
+      if (c > 0) badge = `<span class="badge" style="background:#b8332a">${c}</span>`;
+    }
+    return `<button data-view="${v.key}" class="${currentView===v.key?'active':''}"><span style="display:inline-block;width:14px;text-align:center;">${v.icon}</span> ${v.label} ${badge}</button>`;
+  }).join("");
+  nav.querySelectorAll("button").forEach(b => {
+    b.addEventListener("click", () => navigate(b.dataset.view));
+  });
+}
+
+function navigate(view) {
+  currentView = view;
+  renderNav();
+  const titles = Object.fromEntries(VIEWS.map(v => [v.key, v.label]));
+  $("#view-title").textContent = titles[view] || view;
+  const container = $("#view-container");
+  container.innerHTML = "";
+  switch (view) {
+    case "inicio": renderInicio(container); break;
+    case "inventario": renderInventario(container); break;
+    case "pmp": renderPMP(container); break;
+    case "registro": renderRegistro(container); break;
+    case "st": renderST(container); break;
+    case "no_op": renderNoOp(container); break;
+    case "pendientes": renderPendientes(container); break;
+    case "reconciliacion": renderReconciliacion(container); break;
+  }
+}
+
+/* ============================================================================
+   5. FILTROS TIPO EXCEL — sistema reutilizable
+   ============================================================================ */
+// Para cada vista mantenemos un objeto de filtros: { campo: Set(valores permitidos) }
+// Si no hay entrada para un campo → todo pasa. Si hay Set → solo valores en Set.
+const filterState = {}; // por vista -> { campo: Set }
+
+function getFilters(viewKey) {
+  if (!filterState[viewKey]) filterState[viewKey] = {};
+  return filterState[viewKey];
+}
+function clearFilters(viewKey) {
+  filterState[viewKey] = {};
+}
+function filterRows(viewKey, rows, getters) {
+  const f = getFilters(viewKey);
+  return rows.filter(row => {
+    for (const k in f) {
+      const set = f[k];
+      const v = getters[k] ? getters[k](row) : row[k];
+      if (!set.has(v == null || v === "" ? "(vacío)" : String(v))) return false;
+    }
+    return true;
+  });
+}
+function uniqueValues(rows, getter) {
+  const set = new Set();
+  rows.forEach(r => {
+    let v = getter(r);
+    if (v == null || v === "") v = "(vacío)";
+    set.add(String(v));
+  });
+  return Array.from(set).sort((a,b) => a.localeCompare(b, "es"));
+}
+function openFilterPopup(btn, viewKey, field, allRows, getter, onApply) {
+  closeFilterPopup();
+  const f = getFilters(viewKey);
+  const current = f[field] ? new Set(f[field]) : null;
+  const values = uniqueValues(allRows, getter);
+  const popup = document.createElement("div");
+  popup.className = "filter-popup";
+  popup.innerHTML = `
+    <input type="text" placeholder="Buscar valor..." class="fp-search">
+    <div class="values">
+      <label><input type="checkbox" class="fp-all"> <strong>(Seleccionar todo)</strong></label>
+      ${values.map(v => `<label><input type="checkbox" class="fp-val" value="${escapeHtml(v)}" ${current && !current.has(v) ? "" : "checked"}> ${escapeHtml(v)}</label>`).join("")}
+    </div>
+    <div class="actions">
+      <button class="btn btn-soft btn-sm fp-clear">Quitar</button>
+      <button class="btn btn-primary btn-sm fp-apply">Aplicar</button>
+    </div>
+  `;
+  document.body.appendChild(popup);
+  const rect = btn.getBoundingClientRect();
+  popup.style.top = (rect.bottom + 4) + "px";
+  popup.style.left = Math.min(window.innerWidth - 280, rect.left) + "px";
+
+  const all = popup.querySelector(".fp-all");
+  const vals = () => Array.from(popup.querySelectorAll(".fp-val"));
+  function syncAll() {
+    const checked = vals().filter(v => !v.parentElement.style.display && v.checked).length;
+    const total = vals().filter(v => !v.parentElement.style.display).length;
+    all.checked = checked === total;
+    all.indeterminate = checked > 0 && checked < total;
+  }
+  syncAll();
+  all.addEventListener("change", () => {
+    vals().forEach(v => { if (!v.parentElement.style.display) v.checked = all.checked; });
+  });
+  vals().forEach(v => v.addEventListener("change", syncAll));
+  popup.querySelector(".fp-search").addEventListener("input", e => {
+    const term = e.target.value.toLowerCase();
+    vals().forEach(v => {
+      const match = v.value.toLowerCase().includes(term);
+      v.parentElement.style.display = match ? "" : "none";
+    });
+    syncAll();
+  });
+  popup.querySelector(".fp-clear").addEventListener("click", () => {
+    delete f[field];
+    closeFilterPopup();
+    onApply();
+  });
+  popup.querySelector(".fp-apply").addEventListener("click", () => {
+    const checked = vals().filter(v => v.checked).map(v => v.value);
+    if (checked.length === values.length) {
+      delete f[field];
+    } else {
+      f[field] = new Set(checked);
+    }
+    closeFilterPopup();
+    onApply();
+  });
+  // Cerrar al click fuera
+  setTimeout(() => {
+    document.addEventListener("click", outsideClick);
+  }, 10);
+  function outsideClick(e) {
+    if (!popup.contains(e.target)) closeFilterPopup();
+  }
+  popup._outsideClick = outsideClick;
+}
+function closeFilterPopup() {
+  const p = $(".filter-popup");
+  if (p) {
+    if (p._outsideClick) document.removeEventListener("click", p._outsideClick);
+    p.remove();
+  }
+}
+
+// Helper para crear botón de filtro
+function makeFilterBtn(viewKey, field, allRows, getter, onApply) {
+  const f = getFilters(viewKey);
+  const active = !!f[field];
+  return `<button type="button" class="filter-btn ${active?"active":""}" data-filter="${field}" title="Filtrar columna">▾</button>`;
+}
+function wireFilterButtons(scope, viewKey, fieldMap, allRows, onApply) {
+  scope.querySelectorAll(".filter-btn[data-filter]").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const field = btn.dataset.filter;
+      const getter = fieldMap[field];
+      if (!getter) return;
+      openFilterPopup(btn, viewKey, field, allRows, getter, onApply);
+    });
+  });
+}
+
+/* ============================================================================
+   6. MODAL HELPER
+   ============================================================================ */
+let modalStack = [];
+function openModal({ title, body, footer, size="md" }) {
+  const root = $("#modal-root");
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="modal modal-${size}">
+      <div class="modal-header">
+        <h3>${escapeHtml(title)}</h3>
+        <button class="close" title="Cerrar (Esc)">×</button>
+      </div>
+      <div class="modal-body"></div>
+      ${footer ? `<div class="modal-footer"></div>` : ""}
+    </div>
+  `;
+  const modalBody = backdrop.querySelector(".modal-body");
+  if (typeof body === "string") modalBody.innerHTML = body;
+  else if (body instanceof Node) modalBody.appendChild(body);
+  if (footer) {
+    const f = backdrop.querySelector(".modal-footer");
+    if (typeof footer === "string") f.innerHTML = footer;
+    else if (footer instanceof Node) f.appendChild(footer);
+  }
+  backdrop.querySelector(".close").addEventListener("click", () => closeModal(backdrop));
+  backdrop.addEventListener("click", e => { if (e.target === backdrop) closeModal(backdrop); });
+  root.appendChild(backdrop);
+  modalStack.push(backdrop);
+  return backdrop;
+}
+function closeModal(el) {
+  if (!el) el = modalStack.pop();
+  else modalStack = modalStack.filter(m => m !== el);
+  if (el) el.remove();
+}
+function closeAllModals() {
+  modalStack.forEach(m => m.remove());
+  modalStack = [];
+}
+
+/* ============================================================================
+   7. VISTA: INICIO / DASHBOARD
+   ============================================================================ */
+function renderInicio(container) {
+  const monthSelectId = "dash-month";
+  container.innerHTML = `
+    <div class="view-header">
+      <div>
+        <h1>Panel de gestión MP</h1>
+        <p>Resumen operativo del programa de mantenimiento preventivo.</p>
+      </div>
+      <div class="view-tools">
+        <label style="font-size:11px;color:var(--c-text-mute)">PERÍODO</label>
+        <select id="${monthSelectId}" class="btn btn-soft" style="padding:5px 8px;">
+          <option value="all">Año completo</option>
+          ${MESES.map((m,i)=>`<option value="${m}">${MESES_FULL[i]}</option>`).join("")}
+        </select>
+      </div>
+    </div>
+    <div id="dash-content"></div>
+  `;
+  const update = () => {
+    const sel = $("#"+monthSelectId).value;
+    renderInicioContent($("#dash-content"), sel);
+  };
+  $("#"+monthSelectId).addEventListener("change", update);
+  update();
+}
+
+function renderInicioContent(container, period) {
+  const meses = period === "all" ? MESES : [period];
+  let totProg = 0, totEjec = 0, totRepro = 0, totPend = 0;
+  state.equipos.forEach(eq => {
+    if (eq.EstadoEquipo === "Baja") return;
+    meses.forEach(m => {
+      const p = eq.programacion[m];
+      const r = eq.resultado[m]?.r;
+      if (p === "X" || p === "RA" || p === "PM") totProg++;
+      if (r === "Si") totEjec++;
+      else if (r && r.startsWith("C")) totRepro++;
+      else if (p && !r) totPend++;
+    });
+  });
+  const cumpl = totProg ? Math.round((totEjec / totProg) * 100) : 0;
+  const enST = state.equipos.filter(e => e.EstadoEquipo === "Servicio técnico");
+  const noOp = state.equipos.filter(e => e.EstadoEquipo === "No operativo");
+  const vencidos = state.pendientes.filter(p => p.estado !== "Cerrado" && p.fecha_compromiso && new Date(p.fecha_compromiso) < new Date(today()));
+  const proximos = state.pendientes.filter(p => p.estado !== "Cerrado" && p.fecha_compromiso && daysBetween(today(), p.fecha_compromiso) <= 3 && new Date(p.fecha_compromiso) >= new Date(today()));
+  const incons = state.inconsistencias.filter(i => i.estado === "pendiente");
+
+  container.innerHTML = `
+    <div class="kpi-grid">
+      <div class="kpi accent">
+        <div class="label">MP Programadas</div>
+        <div class="value">${totProg}</div>
+        <div class="sub">${period==="all"?"Año 2026":MESES_FULL[MESES.indexOf(period)]}</div>
+      </div>
+      <div class="kpi success">
+        <div class="label">MP Ejecutadas</div>
+        <div class="value">${totEjec}</div>
+        <div class="sub">Cumplimiento ${cumpl}%</div>
+        <div class="progress-bar"><div style="width:${cumpl}%"></div></div>
+      </div>
+      <div class="kpi warning">
+        <div class="label">Reprogramadas</div>
+        <div class="value">${totRepro}</div>
+        <div class="sub">Con causal C1–C8</div>
+      </div>
+      <div class="kpi danger">
+        <div class="label">Pendientes (sin resultado)</div>
+        <div class="value">${totPend}</div>
+        <div class="sub">Aún sin cierre</div>
+      </div>
+    </div>
+
+    <div class="dash-grid">
+      <div class="card">
+        <div class="card-header">
+          ⚙ Equipos en servicio técnico
+          <button class="btn btn-sm" style="margin-left:auto;" data-go="st">Ver listado</button>
+        </div>
+        <div class="card-body">
+          ${enST.length ? `
+            <p style="margin:0 0 8px 0;"><strong>${enST.length}</strong> equipo${enST.length===1?"":"s"} fuera de operación enviados a servicio técnico.</p>
+            <ul style="margin:0; padding-left:18px;">
+              ${enST.slice(0,5).map(e => {
+                const env = state.envios_st.find(s => s.equipo_id === e._id && !s.fecha_reintegro);
+                const days = env ? daysBetween(env.fecha_envio, today()) : 0;
+                return `<li>${escapeHtml(e.NInventario)} · ${escapeHtml(e.Equipo)} — <strong>${days} días</strong></li>`;
+              }).join("")}
+            </ul>
+          ` : `<p class="empty-state">Sin equipos en servicio técnico.</p>`}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          ⚠ No operativos
+          <button class="btn btn-sm" style="margin-left:auto;" data-go="no_op">Ver listado</button>
+        </div>
+        <div class="card-body">
+          ${noOp.length ? `
+            <p style="margin:0 0 8px 0;"><strong>${noOp.length}</strong> equipo${noOp.length===1?"":"s"} no operativo${noOp.length===1?"":"s"}.</p>
+            <ul style="margin:0; padding-left:18px;">
+              ${noOp.slice(0,5).map(e => {
+                const days = daysBetween(e.FechaEstado, today());
+                return `<li>${escapeHtml(e.NInventario)} · ${escapeHtml(e.Equipo)} — <strong>${days} días</strong></li>`;
+              }).join("")}
+            </ul>
+          ` : `<p class="empty-state">Sin equipos no operativos.</p>`}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          ✓ Pendientes
+          <button class="btn btn-sm" style="margin-left:auto;" data-go="pendientes">Ver listado</button>
+        </div>
+        <div class="card-body">
+          <p style="margin:0 0 8px 0;">
+            <span class="tag tag-danger">Vencidos: ${vencidos.length}</span>
+            <span class="tag tag-warning">Por vencer (≤3d): ${proximos.length}</span>
+          </p>
+          ${vencidos.slice(0,4).map(p => `<div style="font-size:12px; padding:3px 0;">⚠ ${escapeHtml(p.titulo)} · <span style="color:var(--c-text-mute)">${formatDate(p.fecha_compromiso)} · ${escapeHtml(p.responsable)}</span></div>`).join("")}
+          ${proximos.slice(0,4).map(p => `<div style="font-size:12px; padding:3px 0;">⏱ ${escapeHtml(p.titulo)} · <span style="color:var(--c-text-mute)">${formatDate(p.fecha_compromiso)} · ${escapeHtml(p.responsable)}</span></div>`).join("")}
+          ${(!vencidos.length && !proximos.length) ? `<p class="empty-state">Sin alertas.</p>` : ""}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          ↻ Reconciliación con maestro
+          <button class="btn btn-sm" style="margin-left:auto;" data-go="reconciliacion">Ir a reconciliación</button>
+        </div>
+        <div class="card-body">
+          ${incons.length ? `
+            <p style="margin:0 0 8px 0;"><strong>${incons.length}</strong> inconsistencia${incons.length===1?"":"s"} pendiente${incons.length===1?"":"s"} de resolución tras la última carga.</p>
+            <p style="font-size:11px; color:var(--c-text-mute);">Última carga: ${state.meta.lastImported ? new Date(state.meta.lastImported).toLocaleString("es-CL") : "—"}</p>
+          ` : `<p class="empty-state">${state.meta.lastImported ? "Sin inconsistencias pendientes." : "Aún no se ha cargado el maestro."}</p>`}
+        </div>
+      </div>
+    </div>
+  `;
+  container.querySelectorAll("[data-go]").forEach(b => b.addEventListener("click", () => navigate(b.dataset.go)));
+}
+
+/* ============================================================================
+   8. VISTA: INVENTARIO
+   ============================================================================ */
+let invSearch = "";
+function renderInventario(container) {
+  const viewKey = "inventario";
+  container.innerHTML = `
+    <div class="view-header">
+      <div>
+        <h1>Inventario de equipos</h1>
+        <p>${state.equipos.length} equipos · click sobre una fila para abrir la ficha</p>
+      </div>
+      <div class="view-tools">
+        <button class="btn btn-sm" id="inv-clear-filters">Limpiar filtros</button>
+      </div>
+    </div>
+    <div class="table-toolbar">
+      <input type="text" class="search" id="inv-search" placeholder="Buscar por N° Inventario o Serie (coincidencia parcial)…" value="${escapeHtml(invSearch)}">
+      <span class="count" id="inv-count"></span>
+    </div>
+    <div class="table-wrap" id="inv-tablewrap"></div>
+  `;
+  const renderTable = () => {
+    const cols = [
+      { key: "ID",            label: "ID",             freeze: true, width: 50 },
+      { key: "NCarpeta",      label: "N° Carpeta",     freeze: true, width: 90 },
+      { key: "NInventario",   label: "N° Inventario",  freeze: true, width: 110 },
+      { key: "Equipo",        label: "Equipo",         freeze: true, width: 180 },
+      { key: "Servicio",      label: "Servicio" },
+      { key: "Unidad",        label: "Unidad" },
+      { key: "Ubicacion",     label: "Ubicación" },
+      { key: "Procedencia",   label: "Procedencia" },
+      { key: "Marca",         label: "Marca" },
+      { key: "Modelo",        label: "Modelo" },
+      { key: "Serie",         label: "Serie" },
+      { key: "AnoInstalacion",label: "Año Inst." },
+      { key: "VidaUtilResidual", label: "VU Residual" },
+      { key: "Clasificacion", label: "Clasificación" },
+      { key: "ENUBaja",       label: "ENU/Baja" },
+      { key: "EstadoEquipo",  label: "Estado Equipo" },
+    ];
+    const getters = {};
+    cols.forEach(c => getters[c.key] = r => r[c.key]);
+    let rows = state.equipos.slice();
+    if (invSearch.trim()) {
+      const t = invSearch.trim().toLowerCase();
+      rows = rows.filter(e => (e.NInventario||"").toLowerCase().includes(t) || (e.Serie||"").toLowerCase().includes(t));
+    }
+    rows = filterRows(viewKey, rows, getters);
+
+    let left = 0;
+    const colStyles = cols.map(c => {
+      let style = "";
+      if (c.freeze) { style += `left:${left}px;`; left += c.width || 100; }
+      if (c.width) style += `min-width:${c.width}px;`;
+      return style;
+    });
+
+    const html = `
+      <table class="data">
+        <thead>
+          <tr>
+            ${cols.map((c,i)=>`
+              <th class="${c.freeze?'freeze-col':''}" style="${colStyles[i]}">
+                <div class="col-header">
+                  <span>${escapeHtml(c.label)}</span>
+                  ${makeFilterBtn(viewKey, c.key, state.equipos, getters[c.key])}
+                </div>
+              </th>
+            `).join("")}
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(eq => `
+            <tr class="clickable" data-id="${eq._id}">
+              ${cols.map((c,i) => {
+                let val = eq[c.key] ?? "";
+                if (c.key === "EstadoEquipo") {
+                  const cls = "estado-" + String(val).replace(/\s/g,"-");
+                  val = `<span class="estado-pill ${cls}">${escapeHtml(val)}</span>`;
+                } else val = escapeHtml(val);
+                return `<td class="${c.freeze?'freeze-col':''}" style="${colStyles[i]}">${val}</td>`;
+              }).join("")}
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    `;
+    $("#inv-tablewrap").innerHTML = html;
+    $("#inv-count").textContent = `${rows.length} resultado${rows.length===1?"":"s"}`;
+    $("#inv-tablewrap").querySelectorAll("tr.clickable").forEach(tr => {
+      tr.addEventListener("click", () => openFicha(tr.dataset.id));
+    });
+    wireFilterButtons($("#inv-tablewrap"), viewKey, getters, state.equipos, renderTable);
+  };
+  $("#inv-search").addEventListener("input", e => { invSearch = e.target.value; renderTable(); });
+  $("#inv-clear-filters").addEventListener("click", () => { clearFilters(viewKey); renderTable(); });
+  renderTable();
+}
+
+/* ============================================================================
+   9. FICHA DEL EQUIPO (modal pantalla completa)
+   ============================================================================ */
+function openFicha(equipo_id) {
+  const eq = state.equipos.find(e => e._id === equipo_id);
+  if (!eq) return;
+
+  const modal = openModal({
+    title: "",
+    body: "",
+    size: "fullscreen",
+  });
+  modal.querySelector(".modal").innerHTML = `
+    <div class="ficha-header">
+      <div>
+        <h2>${escapeHtml(eq.Equipo)} <span style="font-weight:400; opacity:.8;">· ${escapeHtml(eq.Marca)} ${escapeHtml(eq.Modelo)}</span></h2>
+        <div class="meta">
+          <span><strong>N° Inv.</strong> ${escapeHtml(eq.NInventario)}</span>
+          <span><strong>Serie</strong> ${escapeHtml(eq.Serie)}</span>
+          <span><strong>Carpeta</strong> ${escapeHtml(eq.NCarpeta)}</span>
+          <span><strong>Servicio</strong> ${escapeHtml(eq.Servicio)} · ${escapeHtml(eq.Unidad||"")}</span>
+          <span><strong>Estado</strong> <span class="estado-pill estado-${String(eq.EstadoEquipo).replace(/\s/g,"-")}">${escapeHtml(eq.EstadoEquipo)}</span></span>
+          <span><strong>Responsable MP</strong> ${escapeHtml(eq.ResponsableMP||"—")}</span>
+          <span><strong>Clasificación</strong> ${escapeHtml(eq.Clasificacion||"—")}</span>
+        </div>
+      </div>
+      <div class="ficha-actions">
+        <button class="btn" id="f-mp">+ Registrar MP</button>
+        <button class="btn" id="f-corr">+ Correctivo</button>
+        <button class="btn" id="f-pend">+ Pendiente</button>
+        <button class="btn close" title="Cerrar (Esc)">×</button>
+      </div>
+    </div>
+    <div class="ficha-body" id="ficha-body"></div>
+  `;
+  modal.querySelector(".close").addEventListener("click", () => closeModal(modal));
+  modal.querySelector("#f-mp").addEventListener("click", () => openMPModal(eq));
+  modal.querySelector("#f-corr").addEventListener("click", () => openCorrectivoModal(eq));
+  modal.querySelector("#f-pend").addEventListener("click", () => openPendienteModal({ equipo_id: eq._id }));
+
+  renderFichaBody(modal.querySelector("#ficha-body"), eq);
+}
+
+function renderFichaBody(container, eq) {
+  // Reload eq from state to ensure freshness
+  eq = state.equipos.find(e => e._id === eq._id) || eq;
+  const correctivos = state.correctivos.filter(c => c.equipo_id === eq._id);
+  const pendientes = state.pendientes.filter(p => p.equipo_id === eq._id);
+  const enviosST = state.envios_st.filter(s => s.equipo_id === eq._id);
+
+  container.innerHTML = `
+    <div class="ficha-section">
+      <h4>Registro de mantenciones 2026</h4>
+      <div class="body">
+        <table class="data" style="width:100%;">
+          <thead>
+            <tr>
+              <th style="width:80px;">Mes</th>
+              <th style="width:50px;">P</th>
+              <th style="width:60px;">R</th>
+              <th style="width:100px;">Fecha</th>
+              <th>Ejecutor</th>
+              <th>Estado</th>
+              <th>Observaciones</th>
+              <th style="width:80px;"></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${MESES.map((m,i) => {
+              const p = eq.programacion[m] || "";
+              const r = eq.resultado[m] || {};
+              return `
+                <tr>
+                  <td><strong>${MESES_FULL[i]}</strong></td>
+                  <td>${p ? `<span class="code code-${p}" data-tip="${CODIGOS_DESC[p]||p}">${p}</span>` : ""}</td>
+                  <td>${r.r ? `<span class="code code-${r.r}" data-tip="${CODIGOS_DESC[r.r]||r.r}">${r.r}</span>` : ""}</td>
+                  <td>${r.fecha ? formatDate(r.fecha) : ""}</td>
+                  <td>${escapeHtml(r.ejecutor||"")}</td>
+                  <td>${r.estado ? `<span class="estado-pill estado-${String(r.estado).replace(/\s/g,"-")}">${escapeHtml(r.estado)}</span>` : ""}</td>
+                  <td style="white-space:normal; font-size:11.5px;">${escapeHtml(r.obs||"")}</td>
+                  <td><button class="btn btn-sm" data-reg-mes="${m}">${r.r ? "Editar" : "Registrar"}</button></td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="ficha-section">
+      <h4>Editar programación anual (PMP)</h4>
+      <div class="body">
+        <div class="month-grid">
+          ${MESES.map((m,i) => `
+            <div class="month-cell">
+              <div class="mname">${m}</div>
+              <input type="text" maxlength="2" value="${eq.programacion[m]||""}" data-prog-mes="${m}" placeholder="—">
+            </div>
+          `).join("")}
+        </div>
+        <p style="margin:8px 0 0 0; font-size:11px; color:var(--c-text-mute);">Códigos permitidos: X · R · RA · PM · (vacío). Los cambios se aplican al perder foco.</p>
+      </div>
+    </div>
+
+    <div class="ficha-section">
+      <h4>Historial de correctivos (${correctivos.length})</h4>
+      <div class="body">
+        ${correctivos.length === 0 ? `<p class="empty-state">Sin correctivos registrados.</p>` :
+          correctivos.sort((a,b) => b.fecha.localeCompare(a.fecha)).map(c => `
+            <div style="border-left:3px solid #b8332a; padding:8px 12px; background: var(--c-bg-soft); margin-bottom:8px; border-radius:0 4px 4px 0;">
+              <div style="display:flex; gap:12px; align-items:center; margin-bottom:4px;">
+                <strong>${formatDate(c.fecha)}</strong>
+                <span style="color:var(--c-text-mute); font-size:11.5px;">${escapeHtml(c.ejecutor)}</span>
+                <span class="estado-pill estado-${String(c.estado_final).replace(/\s/g,"-")}" style="margin-left:auto;">${escapeHtml(c.estado_final)}</span>
+              </div>
+              <div style="font-size:12px;"><strong>Falla:</strong> ${escapeHtml(c.falla)}</div>
+              <div style="font-size:12px;"><strong>Acción:</strong> ${escapeHtml(c.accion)}</div>
+              ${c.repuestos ? `<div style="font-size:12px;"><strong>Repuestos:</strong> ${escapeHtml(c.repuestos)}</div>` : ""}
+              ${c.observaciones ? `<div style="font-size:11.5px; color:var(--c-text-mute); margin-top:2px;">${escapeHtml(c.observaciones)}</div>` : ""}
+            </div>
+          `).join("")
+        }
+      </div>
+    </div>
+
+    <div class="ficha-section">
+      <h4>Pendientes asociados (${pendientes.length})</h4>
+      <div class="body">
+        ${pendientes.length === 0 ? `<p class="empty-state">Sin pendientes.</p>` :
+          pendientes.map(p => `
+            <div style="padding:8px 0; border-bottom:1px solid var(--c-border);">
+              <div style="display:flex; gap:10px; align-items:center;">
+                <strong>${escapeHtml(p.titulo)}</strong>
+                <span class="tag tag-${p.prioridad==='Alta'?'danger':p.prioridad==='Media'?'warning':'neutral'}">${p.prioridad}</span>
+                <span class="tag ${p.estado==='Cerrado'?'tag-success':'tag-info'}">${p.estado}</span>
+                <span style="margin-left:auto; font-size:11px; color:var(--c-text-mute);">${formatDate(p.fecha_compromiso)} · ${escapeHtml(p.responsable)}</span>
+                <button class="btn btn-sm" data-open-pend="${p._id}">Abrir</button>
+              </div>
+              ${p.descripcion ? `<div style="font-size:11.5px; color:var(--c-text-mute); margin-top:3px;">${escapeHtml(p.descripcion)}</div>` : ""}
+            </div>
+          `).join("")
+        }
+      </div>
+    </div>
+
+    <div class="ficha-section">
+      <h4>Historial de servicio técnico (${enviosST.length})</h4>
+      <div class="body">
+        ${enviosST.length === 0 ? `<p class="empty-state">Sin envíos a servicio técnico.</p>` :
+          `<table class="data" style="width:100%;">
+            <thead><tr>
+              <th>N° Envío</th><th>Fecha envío</th><th>Solicitud</th><th>Ejecutor / Empresa</th>
+              <th>Reintegro</th><th>Días</th>
+            </tr></thead>
+            <tbody>
+              ${enviosST.sort((a,b)=>b.fecha_envio.localeCompare(a.fecha_envio)).map(s => `
+                <tr>
+                  <td>${escapeHtml(s.n_envio||"")}</td>
+                  <td>${formatDate(s.fecha_envio)}</td>
+                  <td>${escapeHtml(s.solicitud||"")}</td>
+                  <td>${escapeHtml(s.ejecutor_externo||"")}</td>
+                  <td>${s.fecha_reintegro ? formatDate(s.fecha_reintegro) : `<span class="tag tag-warning">En curso</span>`}</td>
+                  <td>${daysBetween(s.fecha_envio, s.fecha_reintegro)}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>`
+        }
+      </div>
+    </div>
+  `;
+
+  container.querySelectorAll("[data-reg-mes]").forEach(b => {
+    b.addEventListener("click", () => openMPModal(eq, b.dataset["regMes"]));
+  });
+  container.querySelectorAll("[data-prog-mes]").forEach(inp => {
+    inp.addEventListener("blur", () => {
+      const m = inp.dataset["progMes"];
+      const v = inp.value.trim().toUpperCase();
+      if (v && !CODIGOS_P.includes(v)) {
+        toast("Código inválido: usar X, R, RA, PM o vacío", "warning");
+        inp.value = eq.programacion[m] || "";
+        return;
+      }
+      eq.programacion[m] = v;
+      markDirty();
+      toast("Programación actualizada", "success", 1500);
+    });
+  });
+  container.querySelectorAll("[data-open-pend]").forEach(b => {
+    b.addEventListener("click", () => {
+      const p = state.pendientes.find(x => x._id === b.dataset["openPend"]);
+      if (p) openPendienteModal(p);
+    });
+  });
+}
+
+/* ============================================================================
+   10. MODAL: REGISTRO DE MP MENSUAL
+   ============================================================================ */
+function openMPModal(eq, preselectMes=null) {
+  const r = preselectMes ? (eq.resultado[preselectMes] || {}) : {};
+  const body = document.createElement("div");
+  body.innerHTML = `
+    <div class="form-row">
+      <div class="form-field required">
+        <label>Mes</label>
+        <select name="mes">${MESES.map((m,i)=>`<option value="${m}" ${preselectMes===m?"selected":""}>${MESES_FULL[i]}</option>`).join("")}</select>
+      </div>
+      <div class="form-field required">
+        <label>Fecha de ejecución / evento</label>
+        <input type="date" name="fecha" value="${r.fecha||today()}">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-field required">
+        <label>Estado del equipo</label>
+        <div class="radio-row">
+          ${["Operativo","No operativo","Servicio técnico"].map(s => `
+            <label><input type="radio" name="estado" value="${s}" ${(r.estado||"Operativo")===s?"checked":""}> ${s}</label>
+          `).join("")}
+        </div>
+      </div>
+      <div class="form-field required">
+        <label>Ejecutor</label>
+        <select name="ejecutor">${RESPONSABLES.map(x=>`<option ${r.ejecutor===x?"selected":""}>${x}</option>`).join("")}</select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-field required">
+        <label>Resultado</label>
+        <select name="resultado">
+          ${CODIGOS_R.map(c => `<option value="${c}" ${r.r===c?"selected":""}>${c} — ${CODIGOS_DESC[c]||""}</option>`).join("")}
+        </select>
+      </div>
+    </div>
+    <div class="form-row" id="repro-row" style="display:none;">
+      <div class="form-field required">
+        <label>Reprogramar para el mes</label>
+        <select name="repro_mes">${MESES.map((m,i)=>`<option value="${m}">${MESES_FULL[i]}</option>`).join("")}</select>
+        <small style="font-size:11px; color:var(--c-text-mute);">Debe ser dentro de 30 días del mes original.</small>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-field" style="flex:1;">
+        <label>Observaciones</label>
+        <textarea name="obs">${escapeHtml(r.obs||"")}</textarea>
+      </div>
+    </div>
+    <div id="st-subform-wrap"></div>
+  `;
+  const footer = document.createElement("div");
+  footer.innerHTML = `<button class="btn" id="mp-cancel">Cancelar</button> <button class="btn btn-primary" id="mp-save">Guardar</button>`;
+
+  const modal = openModal({ title: `Registrar MP — ${eq.NInventario} · ${eq.Equipo}`, body, footer, size: "lg" });
+
+  const resultadoSel = body.querySelector("[name=resultado]");
+  const stWrap = body.querySelector("#st-subform-wrap");
+  const reproRow = body.querySelector("#repro-row");
+  const existingEnvio = state.envios_st.find(s => s.equipo_id === eq._id && !s.fecha_reintegro);
+  function syncSubforms() {
+    const v = resultadoSel.value;
+    const showRepro = ["C1","C5","C6","C7","C8"].includes(v);
+    reproRow.style.display = showRepro ? "" : "none";
+    if (showRepro) {
+      // Sugerir mes destino +1
+      const cur = body.querySelector("[name=mes]").value;
+      const idx = (MESES.indexOf(cur) + 1) % 12;
+      body.querySelector("[name=repro_mes]").value = MESES[idx];
+    }
+    const showST = (v === "C2") || (body.querySelector("[name=estado]:checked")?.value === "Servicio técnico");
+    if (showST) {
+      if (!stWrap.querySelector(".subform")) {
+        stWrap.innerHTML = `
+          <div class="subform">
+            <h5>Envío a servicio técnico</h5>
+            <div class="form-row">
+              <div class="form-field"><label>N° de envío</label><input name="st_envio" value="${existingEnvio?.n_envio||""}"></div>
+              <div class="form-field"><label>Fecha de envío</label><input type="date" name="st_fecha" value="${existingEnvio?.fecha_envio||today()}"></div>
+            </div>
+            <div class="form-row">
+              <div class="form-field"><label>N° de solicitud de trabajo</label><input name="st_sol" value="${existingEnvio?.solicitud||""}"></div>
+              <div class="form-field"><label>Ejecutor / Empresa externa</label><input name="st_emp" value="${existingEnvio?.ejecutor_externo||""}"></div>
+            </div>
+          </div>
+        `;
+      }
+    } else {
+      stWrap.innerHTML = "";
+    }
+  }
+  resultadoSel.addEventListener("change", syncSubforms);
+  body.querySelectorAll("[name=estado]").forEach(r => r.addEventListener("change", syncSubforms));
+  syncSubforms();
+
+  footer.querySelector("#mp-cancel").addEventListener("click", () => closeModal(modal));
+  footer.querySelector("#mp-save").addEventListener("click", () => {
+    const mes = body.querySelector("[name=mes]").value;
+    const fecha = body.querySelector("[name=fecha]").value;
+    const estado = body.querySelector("[name=estado]:checked").value;
+    const ejecutor = body.querySelector("[name=ejecutor]").value;
+    const resultado = body.querySelector("[name=resultado]").value;
+    const obs = body.querySelector("[name=obs]").value;
+    if (!fecha) { toast("Fecha requerida", "warning"); return; }
+
+    // Aplicar al estado
+    const p = eq.programacion[mes] || "X";
+    eq.resultado[mes] = { p, r: resultado, fecha, ejecutor, estado, obs };
+
+    // Lógica por resultado
+    if (["C1","C5","C6","C7","C8"].includes(resultado)) {
+      const destino = body.querySelector("[name=repro_mes]").value;
+      if (!eq.programacion[destino] || eq.programacion[destino] === "") {
+        eq.programacion[destino] = "R";
+      }
+      // mes original conserva X en P y la causal en R
+      eq.resultado[mes].p = p;
+    }
+    if (resultado === "C2") {
+      eq.EstadoAnterior = eq.EstadoEquipo === "Servicio técnico" ? eq.EstadoAnterior : eq.EstadoEquipo;
+      eq.EstadoEquipo = "Servicio técnico";
+      eq.FechaEstado = fecha;
+      // Crear/actualizar envío ST si vino subform
+      const env = body.querySelector("[name=st_envio]");
+      if (env) {
+        const fechaSt = body.querySelector("[name=st_fecha]").value;
+        const sol = body.querySelector("[name=st_sol]").value;
+        const emp = body.querySelector("[name=st_emp]").value;
+        const open = state.envios_st.find(s => s.equipo_id === eq._id && !s.fecha_reintegro);
+        if (open) {
+          open.n_envio = env.value; open.fecha_envio = fechaSt; open.solicitud = sol; open.ejecutor_externo = emp;
+        } else {
+          state.envios_st.push({
+            _id: uid(), equipo_id: eq._id,
+            n_envio: env.value, fecha_envio: fechaSt, solicitud: sol, ejecutor_externo: emp,
+            responsable_interno: ejecutor, fecha_reintegro: null
+          });
+        }
+      }
+    } else if (resultado === "C3") {
+      eq.EstadoAnterior = eq.EstadoEquipo;
+      eq.EstadoEquipo = "No operativo";
+      eq.FechaEstado = fecha;
+    } else if (resultado === "C4") {
+      // Préstamo: conservar estado anterior (lo marcamos en observación de programación)
+      if (!eq.flag_prestamo) eq.flag_prestamo = { desde: fecha, estado_anterior: eq.EstadoEquipo };
+    } else if (resultado === "Baja") {
+      // limpia resto del año
+      const idxMes = MESES.indexOf(mes);
+      for (let i = idxMes + 1; i < 12; i++) {
+        eq.programacion[MESES[i]] = "";
+        delete eq.resultado[MESES[i]];
+      }
+      eq.EstadoEquipo = "Baja";
+      eq.FechaEstado = fecha;
+      eq.ENUBaja = "Baja";
+    } else if (resultado === "FS" || resultado === "NU") {
+      // solo afecta el mes
+    } else if (resultado === "Si") {
+      // Si estado registrado es Operativo y equipo estaba en ST o No operativo, actualizar
+      if (estado === "Operativo" && ["Servicio técnico","No operativo"].includes(eq.EstadoEquipo)) {
+        // cerrar envío ST abierto si lo hay
+        const open = state.envios_st.find(s => s.equipo_id === eq._id && !s.fecha_reintegro);
+        if (open) open.fecha_reintegro = fecha;
+        eq.EstadoEquipo = "Operativo";
+        eq.FechaEstado = fecha;
+      } else if (estado === "Servicio técnico" || estado === "No operativo") {
+        eq.EstadoEquipo = estado;
+        eq.FechaEstado = fecha;
+      }
+    }
+
+    markDirty();
+    toast("Registro MP guardado", "success");
+    closeModal(modal);
+    // refrescar ficha si está abierta
+    const fichaBody = $("#ficha-body");
+    if (fichaBody) renderFichaBody(fichaBody, eq);
+    if (currentView !== "inicio") navigate(currentView);
+  });
+}
+
+/* ============================================================================
+   11. MODAL: CORRECTIVO
+   ============================================================================ */
+function openCorrectivoModal(eq) {
+  const body = document.createElement("div");
+  body.innerHTML = `
+    <div class="form-row">
+      <div class="form-field required"><label>Fecha</label><input type="date" name="fecha" value="${today()}"></div>
+      <div class="form-field required"><label>Ejecutor</label>
+        <select name="ejecutor">${RESPONSABLES.map(x=>`<option>${x}</option>`).join("")}</select>
+      </div>
+    </div>
+    <div class="form-row"><div class="form-field required" style="flex:1;"><label>Falla detectada</label><textarea name="falla"></textarea></div></div>
+    <div class="form-row"><div class="form-field required" style="flex:1;"><label>Acción realizada</label><textarea name="accion"></textarea></div></div>
+    <div class="form-row"><div class="form-field" style="flex:1;"><label>Repuestos utilizados</label><textarea name="repuestos"></textarea></div></div>
+    <div class="form-row">
+      <div class="form-field required"><label>Estado final del equipo</label>
+        <div class="radio-row">
+          ${["Operativo","No operativo","Servicio técnico"].map((s,i)=>`<label><input type="radio" name="estado" value="${s}" ${i===0?"checked":""}> ${s}</label>`).join("")}
+        </div>
+      </div>
+    </div>
+    <div class="form-row"><div class="form-field" style="flex:1;"><label>Observaciones</label><textarea name="obs"></textarea></div></div>
+  `;
+  const footer = document.createElement("div");
+  footer.innerHTML = `<button class="btn" id="c-cancel">Cancelar</button> <button class="btn btn-primary" id="c-save">Guardar</button>`;
+  const modal = openModal({ title: `Registrar correctivo — ${eq.NInventario} · ${eq.Equipo}`, body, footer, size: "lg" });
+  footer.querySelector("#c-cancel").addEventListener("click", () => closeModal(modal));
+  footer.querySelector("#c-save").addEventListener("click", () => {
+    const data = {
+      _id: uid(), equipo_id: eq._id,
+      fecha: body.querySelector("[name=fecha]").value,
+      ejecutor: body.querySelector("[name=ejecutor]").value,
+      falla: body.querySelector("[name=falla]").value.trim(),
+      accion: body.querySelector("[name=accion]").value.trim(),
+      repuestos: body.querySelector("[name=repuestos]").value.trim(),
+      estado_final: body.querySelector("[name=estado]:checked").value,
+      observaciones: body.querySelector("[name=obs]").value.trim(),
+    };
+    if (!data.falla || !data.accion) { toast("Falla y acción son obligatorias", "warning"); return; }
+    state.correctivos.push(data);
+    // actualizar estado del equipo
+    if (data.estado_final !== eq.EstadoEquipo) {
+      eq.EstadoEquipo = data.estado_final;
+      eq.FechaEstado = data.fecha;
+    }
+    markDirty();
+    toast("Correctivo registrado", "success");
+    closeModal(modal);
+    const fichaBody = $("#ficha-body");
+    if (fichaBody) renderFichaBody(fichaBody, eq);
+  });
+}
+
+/* ============================================================================
+   12. MODAL: PENDIENTE (crear / editar)
+   ============================================================================ */
+function openPendienteModal(pendOrSeed) {
+  const isNew = !pendOrSeed._id;
+  let pend = isNew ? {
+    _id: uid(),
+    titulo: "",
+    descripcion: "",
+    fecha_compromiso: addDaysStr(today(), 7),
+    prioridad: "Media",
+    responsable: RESPONSABLES[0],
+    equipo_id: pendOrSeed.equipo_id || null,
+    estado: "Abierto",
+    tareas: [],
+    bitacora: [],
+    creado: new Date().toISOString(),
+  } : pendOrSeed;
+
+  const eqOptions = [`<option value="">— sin equipo —</option>`]
+    .concat(state.equipos.map(e => `<option value="${e._id}" ${pend.equipo_id===e._id?"selected":""}>${escapeHtml(e.NInventario)} · ${escapeHtml(e.Equipo)}</option>`))
+    .join("");
+
+  const body = document.createElement("div");
+  body.innerHTML = `
+    <div class="form-row">
+      <div class="form-field required" style="flex:2;"><label>Título</label><input name="titulo" value="${escapeHtml(pend.titulo)}"></div>
+      <div class="form-field required"><label>Prioridad</label>
+        <select name="prioridad">${["Alta","Media","Baja"].map(p=>`<option ${pend.prioridad===p?"selected":""}>${p}</option>`).join("")}</select>
+      </div>
+      <div class="form-field required"><label>Estado</label>
+        <select name="estado">${["Abierto","En curso","Cerrado"].map(p=>`<option ${pend.estado===p?"selected":""}>${p}</option>`).join("")}</select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-field required"><label>Fecha compromiso</label><input type="date" name="fc" value="${pend.fecha_compromiso||today()}"></div>
+      <div class="form-field required"><label>Responsable</label>
+        <select name="resp">${RESPONSABLES.map(x=>`<option ${pend.responsable===x?"selected":""}>${x}</option>`).join("")}</select>
+      </div>
+      <div class="form-field"><label>Equipo asociado</label><select name="equipo">${eqOptions}</select></div>
+    </div>
+    <div class="form-row"><div class="form-field" style="flex:1;"><label>Descripción</label><textarea name="desc">${escapeHtml(pend.descripcion||"")}</textarea></div></div>
+
+    <div class="form-row"><div class="form-field" style="flex:1;">
+      <label>Tareas (checklist)</label>
+      <div id="tareas-list" style="border:1px solid var(--c-border); border-radius:4px; padding:8px; max-height:180px; overflow-y:auto;"></div>
+      <div style="display:flex; gap:6px; margin-top:6px;">
+        <input type="text" id="nueva-tarea" placeholder="Nueva tarea…" style="flex:1; padding:5px 8px; border:1px solid var(--c-border-strong); border-radius:4px;">
+        <button class="btn btn-sm" id="add-tarea">Agregar</button>
+      </div>
+    </div></div>
+
+    <div class="form-row"><div class="form-field" style="flex:1;">
+      <label>Bitácora</label>
+      <div id="bitacora-list" style="max-height:200px; overflow-y:auto;"></div>
+      <div style="display:flex; gap:6px; margin-top:6px;">
+        <input type="text" id="nueva-entrada" placeholder="Anotar actualización…" style="flex:1; padding:5px 8px; border:1px solid var(--c-border-strong); border-radius:4px;">
+        <button class="btn btn-sm" id="add-entrada">Anotar</button>
+      </div>
+    </div></div>
+  `;
+  const footer = document.createElement("div");
+  footer.innerHTML = `
+    ${!isNew ? `<button class="btn btn-danger" id="p-delete" style="margin-right:auto">Eliminar</button>` : ""}
+    <button class="btn" id="p-cancel">Cancelar</button>
+    <button class="btn btn-primary" id="p-save">${isNew?"Crear":"Guardar"}</button>
+  `;
+  const modal = openModal({ title: isNew ? "Nuevo pendiente" : "Editar pendiente", body, footer, size: "lg" });
+
+  // Tareas local (escritas en pend al guardar para que cancelar funcione)
+  let tareasLocal = pend.tareas.map(t => ({...t}));
+  let bitacoraLocal = pend.bitacora.map(b => ({...b}));
+
+  function renderTareas() {
+    const cont = body.querySelector("#tareas-list");
+    if (!tareasLocal.length) { cont.innerHTML = `<p class="empty-state" style="padding:6px;">Sin tareas.</p>`; return; }
+    const done = tareasLocal.filter(t => t.done).length;
+    cont.innerHTML = `<div style="font-size:11px; color:var(--c-text-mute); margin-bottom:6px;">Avance ${done}/${tareasLocal.length}</div>` +
+      tareasLocal.map(t => `
+        <div class="checklist-item ${t.done?'done':''}">
+          <input type="checkbox" data-tid="${t.id}" ${t.done?"checked":""}>
+          <span class="text">${escapeHtml(t.texto)}</span>
+          <button class="btn btn-sm btn-link" data-tdel="${t.id}">×</button>
+        </div>
+      `).join("");
+    cont.querySelectorAll("[data-tid]").forEach(cb => {
+      cb.addEventListener("change", () => {
+        const t = tareasLocal.find(x => x.id === cb.dataset.tid);
+        if (t) t.done = cb.checked;
+        renderTareas();
+      });
+    });
+    cont.querySelectorAll("[data-tdel]").forEach(b => {
+      b.addEventListener("click", () => {
+        tareasLocal = tareasLocal.filter(x => x.id !== b.dataset.tdel);
+        renderTareas();
+      });
+    });
+  }
+  function renderBitacora() {
+    const cont = body.querySelector("#bitacora-list");
+    if (!bitacoraLocal.length) { cont.innerHTML = `<p class="empty-state" style="padding:6px;">Sin entradas.</p>`; return; }
+    cont.innerHTML = bitacoraLocal.slice().reverse().map(b => `
+      <div class="bitacora-entry">
+        <div class="ts">${new Date(b.ts).toLocaleString("es-CL")}</div>
+        <div>${escapeHtml(b.texto)}</div>
+      </div>
+    `).join("");
+  }
+  renderTareas(); renderBitacora();
+  body.querySelector("#add-tarea").addEventListener("click", () => {
+    const txt = body.querySelector("#nueva-tarea").value.trim();
+    if (!txt) return;
+    tareasLocal.push({ id: uid(), texto: txt, done: false });
+    body.querySelector("#nueva-tarea").value = "";
+    renderTareas();
+  });
+  body.querySelector("#nueva-tarea").addEventListener("keydown", e => {
+    if (e.key === "Enter") { e.preventDefault(); body.querySelector("#add-tarea").click(); }
+  });
+  body.querySelector("#add-entrada").addEventListener("click", () => {
+    const txt = body.querySelector("#nueva-entrada").value.trim();
+    if (!txt) return;
+    bitacoraLocal.push({ ts: new Date().toISOString(), texto: txt });
+    body.querySelector("#nueva-entrada").value = "";
+    renderBitacora();
+  });
+  body.querySelector("#nueva-entrada").addEventListener("keydown", e => {
+    if (e.key === "Enter") { e.preventDefault(); body.querySelector("#add-entrada").click(); }
+  });
+  footer.querySelector("#p-cancel").addEventListener("click", () => closeModal(modal));
+  if (!isNew) {
+    footer.querySelector("#p-delete").addEventListener("click", () => {
+      if (confirm("¿Eliminar este pendiente?")) {
+        state.pendientes = state.pendientes.filter(p => p._id !== pend._id);
+        markDirty();
+        closeModal(modal);
+        if (currentView === "pendientes") navigate("pendientes");
+        const fichaBody = $("#ficha-body");
+        if (fichaBody) {
+          const eq = state.equipos.find(e => e._id === pend.equipo_id);
+          if (eq) renderFichaBody(fichaBody, eq);
+        }
+      }
+    });
+  }
+  footer.querySelector("#p-save").addEventListener("click", () => {
+    const titulo = body.querySelector("[name=titulo]").value.trim();
+    if (!titulo) { toast("Título requerido", "warning"); return; }
+    pend.titulo = titulo;
+    pend.prioridad = body.querySelector("[name=prioridad]").value;
+    pend.estado = body.querySelector("[name=estado]").value;
+    pend.fecha_compromiso = body.querySelector("[name=fc]").value;
+    pend.responsable = body.querySelector("[name=resp]").value;
+    pend.equipo_id = body.querySelector("[name=equipo]").value || null;
+    pend.descripcion = body.querySelector("[name=desc]").value.trim();
+    pend.tareas = tareasLocal;
+    pend.bitacora = bitacoraLocal;
+    if (isNew) state.pendientes.push(pend);
+    markDirty();
+    toast("Pendiente guardado", "success");
+    closeModal(modal);
+    if (currentView === "pendientes") navigate("pendientes");
+    const fichaBody = $("#ficha-body");
+    if (fichaBody) {
+      const eq = state.equipos.find(e => e._id === pend.equipo_id);
+      if (eq) renderFichaBody(fichaBody, eq);
+    }
+  });
+}
+
+/* ============================================================================
+   13. VISTA: SERVICIO TÉCNICO
+   ============================================================================ */
+function renderST(container) {
+  const viewKey = "st";
+  const rows = state.equipos
+    .filter(e => e.EstadoEquipo === "Servicio técnico")
+    .map(e => {
+      const env = state.envios_st.find(s => s.equipo_id === e._id && !s.fecha_reintegro);
+      return {
+        eq: e, env: env || {},
+        dias: env ? daysBetween(env.fecha_envio, today()) : 0,
+      };
+    });
+
+  const cols = [
+    { key: "NInventario",     label: "N° Inventario",   get: r => r.eq.NInventario },
+    { key: "Equipo",          label: "Equipo",          get: r => r.eq.Equipo },
+    { key: "Marca",           label: "Marca",           get: r => r.eq.Marca },
+    { key: "Modelo",          label: "Modelo",          get: r => r.eq.Modelo },
+    { key: "Serie",           label: "Serie",           get: r => r.eq.Serie },
+    { key: "Servicio",        label: "Servicio",        get: r => r.eq.Servicio },
+    { key: "Ubicacion",       label: "Ubicación",       get: r => r.eq.Ubicacion },
+    { key: "n_envio",         label: "N° Envío",        get: r => r.env.n_envio },
+    { key: "fecha_envio",     label: "Fecha envío",     get: r => r.env.fecha_envio },
+    { key: "solicitud",       label: "Solicitud",       get: r => r.env.solicitud },
+    { key: "ejecutor",        label: "Ejecutor / Empresa", get: r => r.env.ejecutor_externo },
+    { key: "dias",            label: "Días en ST",      get: r => r.dias },
+    { key: "responsable",     label: "Resp. interno",   get: r => r.env.responsable_interno },
+  ];
+
+  container.innerHTML = `
+    <div class="view-header">
+      <div>
+        <h1>Equipos en servicio técnico</h1>
+        <p>${rows.length} equipo${rows.length===1?"":"s"} actualmente fuera de operación enviados a servicio técnico.</p>
+      </div>
+      <div class="view-tools">
+        <button class="btn btn-sm" id="st-clear">Limpiar filtros</button>
+      </div>
+    </div>
+    <div class="table-wrap" id="st-tablewrap"></div>
+  `;
+  const getters = {}; cols.forEach(c => getters[c.key] = c.get);
+
+  const render = () => {
+    let filtered = filterRows(viewKey, rows, getters);
+    $("#st-tablewrap").innerHTML = `
+      <table class="data">
+        <thead><tr>
+          ${cols.map(c=>`<th><div class="col-header"><span>${c.label}</span>${makeFilterBtn(viewKey, c.key, rows, c.get)}</div></th>`).join("")}
+          <th>Acción</th>
+        </tr></thead>
+        <tbody>
+          ${filtered.length === 0 ? `<tr><td colspan="${cols.length+1}" class="empty-state">Sin equipos en servicio técnico.</td></tr>` :
+            filtered.map(r => {
+              let urgent = "";
+              if (r.dias >= 60) urgent = "urgent-high";
+              else if (r.dias >= 30) urgent = "urgent-mid";
+              else if (r.dias >= 15) urgent = "urgent-low";
+              return `<tr class="${urgent}" data-id="${r.eq._id}">
+                ${cols.map(c => {
+                  let v = c.get(r) ?? "";
+                  if (c.key === "fecha_envio") v = formatDate(v);
+                  if (c.key === "dias") v = `<strong>${v}</strong>`;
+                  return `<td>${typeof v === "string" || typeof v === "number" ? (c.key==="dias"?v:escapeHtml(v)) : v}</td>`;
+                }).join("")}
+                <td><button class="btn btn-sm" data-reintegro="${r.env._id||''}">Registrar reintegro</button></td>
+              </tr>`;
+            }).join("")
+          }
+        </tbody>
+      </table>
+    `;
+    $("#st-tablewrap").querySelectorAll("[data-reintegro]").forEach(b => {
+      b.addEventListener("click", () => openReintegroModal(b.dataset.reintegro));
+    });
+    $("#st-tablewrap").querySelectorAll("tr[data-id]").forEach(tr => {
+      tr.addEventListener("click", e => {
+        if (e.target.tagName === "BUTTON") return;
+        openFicha(tr.dataset.id);
+      });
+    });
+    wireFilterButtons($("#st-tablewrap"), viewKey, getters, rows, render);
+  };
+  $("#st-clear").addEventListener("click", () => { clearFilters(viewKey); render(); });
+  render();
+}
+
+function openReintegroModal(envio_id) {
+  const env = state.envios_st.find(s => s._id === envio_id);
+  if (!env) return;
+  const eq = state.equipos.find(e => e._id === env.equipo_id);
+  const body = document.createElement("div");
+  body.innerHTML = `
+    <p>Registrar reintegro del equipo <strong>${escapeHtml(eq.NInventario)} · ${escapeHtml(eq.Equipo)}</strong>.</p>
+    <div class="form-row">
+      <div class="form-field required"><label>Fecha de reintegro</label><input type="date" name="fecha" value="${today()}"></div>
+      <div class="form-field required"><label>Estado al reintegro</label>
+        <div class="radio-row">
+          <label><input type="radio" name="estado" value="Operativo" checked> Operativo</label>
+          <label><input type="radio" name="estado" value="No operativo"> No operativo</label>
+        </div>
+      </div>
+    </div>
+    <div class="form-row"><div class="form-field" style="flex:1;"><label>Observaciones</label><textarea name="obs"></textarea></div></div>
+  `;
+  const footer = document.createElement("div");
+  footer.innerHTML = `<button class="btn" id="r-cancel">Cancelar</button> <button class="btn btn-primary" id="r-save">Confirmar reintegro</button>`;
+  const modal = openModal({ title: "Registrar reintegro de ST", body, footer, size: "md" });
+  footer.querySelector("#r-cancel").addEventListener("click", () => closeModal(modal));
+  footer.querySelector("#r-save").addEventListener("click", () => {
+    env.fecha_reintegro = body.querySelector("[name=fecha]").value;
+    const estado = body.querySelector("[name=estado]:checked").value;
+    eq.EstadoEquipo = estado;
+    eq.FechaEstado = env.fecha_reintegro;
+    markDirty();
+    toast("Reintegro registrado", "success");
+    closeModal(modal);
+    navigate(currentView);
+  });
+}
+
+/* ============================================================================
+   14. VISTA: NO OPERATIVOS
+   ============================================================================ */
+function renderNoOp(container) {
+  const viewKey = "no_op";
+  const rows = state.equipos
+    .filter(e => e.EstadoEquipo === "No operativo")
+    .map(e => {
+      // Motivo: último resultado registrado
+      let motivo = "";
+      for (let i = 11; i >= 0; i--) {
+        const r = e.resultado[MESES[i]];
+        if (r && (r.r?.startsWith("C") || r.r === "FS")) { motivo = `${r.r} (${MESES[i]})`; if (r.obs) motivo += " — " + r.obs; break; }
+      }
+      if (!motivo) motivo = "—";
+      return {
+        eq: e,
+        fecha: e.FechaEstado,
+        dias: daysBetween(e.FechaEstado, today()),
+        motivo,
+      };
+    });
+  const cols = [
+    { key: "NInventario", label: "N° Inventario", get: r => r.eq.NInventario },
+    { key: "Equipo",      label: "Equipo",        get: r => r.eq.Equipo },
+    { key: "Marca",       label: "Marca",         get: r => r.eq.Marca },
+    { key: "Modelo",      label: "Modelo",        get: r => r.eq.Modelo },
+    { key: "Serie",       label: "Serie",         get: r => r.eq.Serie },
+    { key: "Servicio",    label: "Servicio",      get: r => r.eq.Servicio },
+    { key: "Ubicacion",   label: "Ubicación",     get: r => r.eq.Ubicacion },
+    { key: "fecha",       label: "Fecha desde",   get: r => r.fecha },
+    { key: "dias",        label: "Días no operativo", get: r => r.dias },
+    { key: "motivo",      label: "Motivo",        get: r => r.motivo },
+    { key: "responsable", label: "Responsable",   get: r => r.eq.ResponsableMP },
+  ];
+  container.innerHTML = `
+    <div class="view-header">
+      <div>
+        <h1>Equipos no operativos</h1>
+        <p>${rows.length} equipo${rows.length===1?"":"s"} actualmente no operativos.</p>
+      </div>
+      <div class="view-tools">
+        <button class="btn btn-sm" id="no-clear">Limpiar filtros</button>
+      </div>
+    </div>
+    <div class="table-wrap" id="no-tablewrap"></div>
+  `;
+  const getters = {}; cols.forEach(c => getters[c.key] = c.get);
+  const render = () => {
+    let filtered = filterRows(viewKey, rows, getters);
+    $("#no-tablewrap").innerHTML = `
+      <table class="data">
+        <thead><tr>
+          ${cols.map(c=>`<th><div class="col-header"><span>${c.label}</span>${makeFilterBtn(viewKey, c.key, rows, c.get)}</div></th>`).join("")}
+          <th>Acción</th>
+        </tr></thead>
+        <tbody>
+          ${filtered.length === 0 ? `<tr><td colspan="${cols.length+1}" class="empty-state">Sin equipos no operativos.</td></tr>` :
+            filtered.map(r => {
+              let u = "";
+              if (r.dias >= 60) u = "urgent-high";
+              else if (r.dias >= 30) u = "urgent-mid";
+              else if (r.dias >= 15) u = "urgent-low";
+              return `<tr class="${u}" data-id="${r.eq._id}">
+                ${cols.map(c => {
+                  let v = c.get(r) ?? "";
+                  if (c.key === "fecha") v = formatDate(v);
+                  if (c.key === "dias") return `<td><strong>${v}</strong></td>`;
+                  return `<td>${escapeHtml(v)}</td>`;
+                }).join("")}
+                <td><button class="btn btn-sm" data-cambiar="${r.eq._id}">Cambiar estado</button></td>
+              </tr>`;
+            }).join("")
+          }
+        </tbody>
+      </table>
+    `;
+    $("#no-tablewrap").querySelectorAll("[data-cambiar]").forEach(b => {
+      b.addEventListener("click", () => openCambioEstadoModal(b.dataset.cambiar));
+    });
+    $("#no-tablewrap").querySelectorAll("tr[data-id]").forEach(tr => {
+      tr.addEventListener("click", e => { if (e.target.tagName === "BUTTON") return; openFicha(tr.dataset.id); });
+    });
+    wireFilterButtons($("#no-tablewrap"), viewKey, getters, rows, render);
+  };
+  $("#no-clear").addEventListener("click", () => { clearFilters(viewKey); render(); });
+  render();
+}
+
+function openCambioEstadoModal(eq_id) {
+  const eq = state.equipos.find(e => e._id === eq_id);
+  const body = document.createElement("div");
+  body.innerHTML = `
+    <p>Cambiar estado de <strong>${escapeHtml(eq.NInventario)} · ${escapeHtml(eq.Equipo)}</strong>.</p>
+    <div class="form-row">
+      <div class="form-field required"><label>Nuevo estado</label>
+        <select name="estado">${ESTADOS_EQUIPO.map(s => `<option ${eq.EstadoEquipo===s?"selected":""}>${s}</option>`).join("")}</select>
+      </div>
+      <div class="form-field required"><label>Fecha</label><input type="date" name="fecha" value="${today()}"></div>
+    </div>
+    <div class="form-row"><div class="form-field" style="flex:1;"><label>Observaciones</label><textarea name="obs"></textarea></div></div>
+  `;
+  const footer = document.createElement("div");
+  footer.innerHTML = `<button class="btn" id="e-cancel">Cancelar</button> <button class="btn btn-primary" id="e-save">Guardar</button>`;
+  const modal = openModal({ title: "Cambiar estado de equipo", body, footer, size: "md" });
+  footer.querySelector("#e-cancel").addEventListener("click", () => closeModal(modal));
+  footer.querySelector("#e-save").addEventListener("click", () => {
+    eq.EstadoAnterior = eq.EstadoEquipo;
+    eq.EstadoEquipo = body.querySelector("[name=estado]").value;
+    eq.FechaEstado = body.querySelector("[name=fecha]").value;
+    markDirty();
+    toast("Estado actualizado", "success");
+    closeModal(modal);
+    navigate(currentView);
+  });
+}
+
+/* ============================================================================
+   15. VISTA: PENDIENTES
+   ============================================================================ */
+function renderPendientes(container) {
+  const viewKey = "pendientes";
+  const rows = state.pendientes.map(p => {
+    const eq = p.equipo_id ? state.equipos.find(e => e._id === p.equipo_id) : null;
+    const days = p.fecha_compromiso ? Math.floor((new Date(p.fecha_compromiso) - new Date(today())) / 86400000) : null;
+    return { p, eqLabel: eq ? `${eq.NInventario} · ${eq.Equipo}` : "—", days };
+  });
+  const cols = [
+    { key: "titulo",       label: "Título",        get: r => r.p.titulo },
+    { key: "prioridad",    label: "Prioridad",     get: r => r.p.prioridad },
+    { key: "estado",       label: "Estado",        get: r => r.p.estado },
+    { key: "responsable",  label: "Responsable",   get: r => r.p.responsable },
+    { key: "fecha_compromiso", label: "Compromiso", get: r => r.p.fecha_compromiso },
+    { key: "equipo",       label: "Equipo asociado", get: r => r.eqLabel },
+    { key: "avance",       label: "Tareas",        get: r => `${r.p.tareas.filter(t=>t.done).length}/${r.p.tareas.length}` },
+  ];
+
+  container.innerHTML = `
+    <div class="view-header">
+      <div>
+        <h1>Pendientes</h1>
+        <p>${state.pendientes.length} pendiente${state.pendientes.length===1?"":"s"} registrado${state.pendientes.length===1?"":"s"}.</p>
+      </div>
+      <div class="view-tools">
+        <button class="btn btn-sm" id="p-clear">Limpiar filtros</button>
+        <button class="btn btn-primary btn-sm" id="p-new">+ Nuevo pendiente</button>
+      </div>
+    </div>
+    <div class="table-wrap" id="p-tablewrap"></div>
+  `;
+  const getters = {}; cols.forEach(c => getters[c.key] = c.get);
+  const render = () => {
+    let filtered = filterRows(viewKey, rows, getters);
+    $("#p-tablewrap").innerHTML = `
+      <table class="data">
+        <thead><tr>
+          ${cols.map(c=>`<th><div class="col-header"><span>${c.label}</span>${makeFilterBtn(viewKey, c.key, rows, c.get)}</div></th>`).join("")}
+        </tr></thead>
+        <tbody>
+          ${filtered.length === 0 ? `<tr><td colspan="${cols.length}" class="empty-state">Sin pendientes.</td></tr>` :
+            filtered.map(r => {
+              const venc = r.p.estado !== "Cerrado" && r.days !== null && r.days < 0;
+              const prox = r.p.estado !== "Cerrado" && r.days !== null && r.days >= 0 && r.days <= 3;
+              const u = venc ? "urgent-high" : (prox ? "urgent-low" : "");
+              return `<tr class="${u} clickable" data-id="${r.p._id}">
+                <td><strong>${escapeHtml(r.p.titulo)}</strong>${r.p.descripcion?`<br><span style="font-size:11px; color:var(--c-text-mute);">${escapeHtml(r.p.descripcion.slice(0,80))}${r.p.descripcion.length>80?'…':''}</span>`:""}</td>
+                <td><span class="tag tag-${r.p.prioridad==='Alta'?'danger':r.p.prioridad==='Media'?'warning':'neutral'}">${r.p.prioridad}</span></td>
+                <td><span class="tag ${r.p.estado==='Cerrado'?'tag-success':r.p.estado==='En curso'?'tag-info':'tag-neutral'}">${r.p.estado}</span></td>
+                <td>${escapeHtml(r.p.responsable)}</td>
+                <td>${formatDate(r.p.fecha_compromiso)} ${venc?`<span class="tag tag-danger">Vencido</span>`:prox?`<span class="tag tag-warning">${r.days}d</span>`:""}</td>
+                <td>${escapeHtml(r.eqLabel)}</td>
+                <td>${escapeHtml(r.p.tareas.filter(t=>t.done).length+"/"+r.p.tareas.length)}</td>
+              </tr>`;
+            }).join("")
+          }
+        </tbody>
+      </table>
+    `;
+    $("#p-tablewrap").querySelectorAll("tr[data-id]").forEach(tr => {
+      tr.addEventListener("click", () => {
+        const p = state.pendientes.find(x => x._id === tr.dataset.id);
+        if (p) openPendienteModal(p);
+      });
+    });
+    wireFilterButtons($("#p-tablewrap"), viewKey, getters, rows, render);
+  };
+  $("#p-clear").addEventListener("click", () => { clearFilters(viewKey); render(); });
+  $("#p-new").addEventListener("click", () => openPendienteModal({}));
+  render();
+}
+
+/* ============================================================================
+   16. VISTA: PMP_2026 (réplica solo lectura)
+   ============================================================================ */
+function renderPMP(container) {
+  const viewKey = "pmp";
+  const idCols = [
+    { key: "ID", label: "ID", w: 50 },
+    { key: "NCarpeta", label: "N° Carpeta", w: 90 },
+    { key: "NInventario", label: "N° Inventario", w: 110 },
+    { key: "Equipo", label: "Equipo", w: 180 },
+    { key: "Servicio", label: "Servicio", w: 130 },
+    { key: "Marca", label: "Marca", w: 100 },
+    { key: "Modelo", label: "Modelo", w: 110 },
+  ];
+  container.innerHTML = `
+    <div class="view-header">
+      <div><h1>PMP 2026 — Programación anual</h1><p>Réplica de la hoja oficial. Edición desde la ficha del equipo.</p></div>
+      <div class="view-tools">
+        <button class="btn btn-sm" id="pmp-clear">Limpiar filtros</button>
+      </div>
+    </div>
+    <div class="legend">
+      Leyenda:
+      ${["X","R","RA","PM"].map(c => `<span class="code code-${c}" data-tip="${CODIGOS_DESC[c]}">${c}</span>`).join(" ")}
+    </div>
+    <div class="table-wrap" id="pmp-tablewrap"></div>
+  `;
+  const getters = {};
+  idCols.forEach(c => getters[c.key] = r => r[c.key]);
+  MESES.forEach(m => getters["m_"+m] = r => r.programacion[m] || "(vacío)");
+  const allRows = state.equipos;
+
+  const render = () => {
+    let rows = filterRows(viewKey, allRows, getters);
+    let left = 0;
+    const idStyles = idCols.map(c => { const s = `left:${left}px; min-width:${c.w}px;`; left += c.w; return s; });
+    $("#pmp-tablewrap").innerHTML = `
+      <table class="data">
+        <thead>
+          <tr>
+            ${idCols.map((c,i)=>`<th class="freeze-col" style="${idStyles[i]}"><div class="col-header"><span>${c.label}</span>${makeFilterBtn(viewKey, c.key, allRows, getters[c.key])}</div></th>`).join("")}
+            ${MESES.map(m=>`<th class="month"><div class="col-header" style="justify-content:center;"><span>${m}</span>${makeFilterBtn(viewKey, "m_"+m, allRows, getters["m_"+m])}</div></th>`).join("")}
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(eq => `
+            <tr class="clickable" data-id="${eq._id}">
+              ${idCols.map((c,i)=>`<td class="freeze-col" style="${idStyles[i]}">${escapeHtml(eq[c.key]||"")}</td>`).join("")}
+              ${MESES.map(m => {
+                const v = eq.programacion[m];
+                return `<td class="month">${v?`<span class="code code-${v}" data-tip="${CODIGOS_DESC[v]||v}">${v}</span>`:""}</td>`;
+              }).join("")}
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    `;
+    $("#pmp-tablewrap").querySelectorAll("tr[data-id]").forEach(tr => {
+      tr.addEventListener("click", () => openFicha(tr.dataset.id));
+    });
+    wireFilterButtons($("#pmp-tablewrap"), viewKey, getters, allRows, render);
+  };
+  $("#pmp-clear").addEventListener("click", () => { clearFilters(viewKey); render(); });
+  render();
+}
+
+/* ============================================================================
+   17. VISTA: REGISTRO_MP-2026 (réplica solo lectura con P|R)
+   ============================================================================ */
+function renderRegistro(container) {
+  const viewKey = "registro";
+  const idCols = [
+    { key: "NCarpeta", label: "N° Carpeta", w: 90 },
+    { key: "NInventario", label: "N° Inventario", w: 110 },
+    { key: "Equipo", label: "Equipo", w: 180 },
+    { key: "Servicio", label: "Servicio", w: 130 },
+  ];
+  container.innerHTML = `
+    <div class="view-header">
+      <div><h1>Registro MP 2026</h1><p>Programación (P) y Resultado (R) por mes. Edición desde la ficha del equipo.</p></div>
+      <div class="view-tools">
+        <button class="btn btn-sm" id="reg-clear">Limpiar filtros</button>
+      </div>
+    </div>
+    <div class="legend">
+      Códigos P:
+      ${["X","R","RA","PM"].map(c => `<span class="code code-${c}" data-tip="${CODIGOS_DESC[c]}">${c}</span>`).join(" ")}
+      &nbsp;&nbsp;Códigos R:
+      ${["Si","C1","C2","C3","C4","C5","C6","C7","C8","FS","Baja","NU"].map(c => `<span class="code code-${c}" data-tip="${CODIGOS_DESC[c]||c}">${c}</span>`).join(" ")}
+    </div>
+    <div class="table-wrap" id="reg-tablewrap"></div>
+  `;
+  const getters = {};
+  idCols.forEach(c => getters[c.key] = r => r[c.key]);
+  MESES.forEach(m => {
+    getters["p_"+m] = r => r.programacion[m] || "(vacío)";
+    getters["r_"+m] = r => r.resultado[m]?.r || "(vacío)";
+  });
+  const allRows = state.equipos;
+
+  const render = () => {
+    let rows = filterRows(viewKey, allRows, getters);
+    let left = 0;
+    const idStyles = idCols.map(c => { const s = `left:${left}px; min-width:${c.w}px;`; left += c.w; return s; });
+    $("#reg-tablewrap").innerHTML = `
+      <table class="data">
+        <thead>
+          <tr>
+            ${idCols.map((c,i)=>`<th class="freeze-col" rowspan="2" style="${idStyles[i]}"><div class="col-header"><span>${c.label}</span>${makeFilterBtn(viewKey, c.key, allRows, getters[c.key])}</div></th>`).join("")}
+            ${MESES.map(m=>`<th class="month-pair" colspan="2">${m}</th>`).join("")}
+          </tr>
+          <tr>
+            ${MESES.map(m=>`
+              <th class="month"><div class="col-header" style="justify-content:center;"><span>P</span>${makeFilterBtn(viewKey, "p_"+m, allRows, getters["p_"+m])}</div></th>
+              <th class="month"><div class="col-header" style="justify-content:center;"><span>R</span>${makeFilterBtn(viewKey, "r_"+m, allRows, getters["r_"+m])}</div></th>
+            `).join("")}
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(eq => `
+            <tr class="clickable" data-id="${eq._id}">
+              ${idCols.map((c,i)=>`<td class="freeze-col" style="${idStyles[i]}">${escapeHtml(eq[c.key]||"")}</td>`).join("")}
+              ${MESES.map(m => {
+                const p = eq.programacion[m];
+                const r = eq.resultado[m]?.r;
+                return `
+                  <td class="month">${p?`<span class="code code-${p}" data-tip="${CODIGOS_DESC[p]||p}">${p}</span>`:""}</td>
+                  <td class="month">${r?`<span class="code code-${r}" data-tip="${CODIGOS_DESC[r]||r}">${r}</span>`:""}</td>
+                `;
+              }).join("")}
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    `;
+    $("#reg-tablewrap").querySelectorAll("tr[data-id]").forEach(tr => {
+      tr.addEventListener("click", () => openFicha(tr.dataset.id));
+    });
+    wireFilterButtons($("#reg-tablewrap"), viewKey, getters, allRows, render);
+  };
+  $("#reg-clear").addEventListener("click", () => { clearFilters(viewKey); render(); });
+  render();
+}
+
+/* ============================================================================
+   18. VISTA: RECONCILIACIÓN
+   ============================================================================ */
+function renderReconciliacion(container) {
+  const pend = state.inconsistencias.filter(i => i.estado === "pendiente");
+  const res  = state.inconsistencias.filter(i => i.estado !== "pendiente");
+
+  // Orden por severidad
+  const sev = { "identificacion":1, "equipo_no_app":2, "equipo_no_excel":2, "programacion":3, "resultado":4, "estado":5, "enu_baja":1 };
+  pend.sort((a,b) => (sev[a.tipo]||9) - (sev[b.tipo]||9));
+
+  container.innerHTML = `
+    <div class="view-header">
+      <div>
+        <h1>Reconciliación con archivo maestro</h1>
+        <p>Última carga: ${state.meta.lastImported ? new Date(state.meta.lastImported).toLocaleString("es-CL") : "—"}</p>
+      </div>
+      <div class="view-tools">
+        ${pend.length ? `<button class="btn btn-sm" id="rec-accept-all">Aceptar todo del Excel</button>` : ""}
+      </div>
+    </div>
+
+    ${pend.length === 0 ? `
+      <div class="card"><div class="card-body empty-state">
+        ${state.meta.lastImported ? "Sin inconsistencias pendientes." : "Aún no se ha cargado el archivo maestro. Use \"Cargar maestro\" en la barra superior."}
+      </div></div>
+    ` : `
+      <div class="card">
+        <div class="card-header">Inconsistencias pendientes (${pend.length})</div>
+        <div style="overflow:auto;">
+          <table class="data" style="width:100%;">
+            <thead><tr>
+              <th>Equipo</th><th>Tipo</th><th>Campo</th><th>Valor en la app</th><th>Valor en el Excel</th><th>Acciones</th>
+            </tr></thead>
+            <tbody>
+              ${pend.map(i => {
+                const eq = state.equipos.find(e => e._id === i.equipo_id);
+                const eqLabel = eq ? `${eq.NInventario} · ${eq.Equipo}` : (i.equipo_label || "—");
+                return `<tr>
+                  <td>${escapeHtml(eqLabel)}</td>
+                  <td><span class="tag tag-info">${i.tipo}</span></td>
+                  <td>${escapeHtml(i.campo||"")}</td>
+                  <td>${escapeHtml(String(i.app??""))||"<em style='color:#999'>—</em>"}</td>
+                  <td>${escapeHtml(String(i.excel??""))||"<em style='color:#999'>—</em>"}</td>
+                  <td style="white-space:normal;">
+                    <button class="btn btn-sm btn-primary" data-act="accept" data-id="${i._id}">Excel</button>
+                    <button class="btn btn-sm" data-act="keep" data-id="${i._id}">App</button>
+                    <button class="btn btn-sm" data-act="ignore" data-id="${i._id}">Ignorar</button>
+                  </td>
+                </tr>`;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `}
+
+    ${res.length ? `
+      <div class="card" style="margin-top:14px;">
+        <div class="card-header">Resueltas / ignoradas (${res.length})</div>
+        <div class="card-body" style="max-height:200px; overflow-y:auto; font-size:11.5px; color:var(--c-text-mute);">
+          ${res.slice().reverse().slice(0,30).map(i => `<div>${escapeHtml(i.tipo)} · ${escapeHtml(i.campo||"")} → <em>${escapeHtml(i.estado)}</em></div>`).join("")}
+        </div>
+      </div>
+    ` : ""}
+  `;
+
+  container.querySelectorAll("[data-act]").forEach(b => {
+    b.addEventListener("click", () => {
+      const id = b.dataset.id, act = b.dataset.act;
+      resolveInconsistencia(id, act);
+      renderReconciliacion(container);
+      renderNav();
+    });
+  });
+  const ac = container.querySelector("#rec-accept-all");
+  if (ac) ac.addEventListener("click", () => {
+    if (!confirm("¿Aceptar el valor del Excel para todas las inconsistencias pendientes?")) return;
+    pend.forEach(i => resolveInconsistencia(i._id, "accept"));
+    renderReconciliacion(container);
+    renderNav();
+  });
+}
+
+function resolveInconsistencia(id, act) {
+  const i = state.inconsistencias.find(x => x._id === id);
+  if (!i) return;
+  if (act === "accept") {
+    applyInconsistencia(i);
+    i.estado = "aceptada";
+  } else if (act === "keep") {
+    i.estado = "rechazada";
+  } else if (act === "ignore") {
+    i.estado = "ignorada";
+  }
+  markDirty();
+}
+
+function applyInconsistencia(i) {
+  if (i.tipo === "equipo_no_app") {
+    // El equipo viene del Excel y no está en la app → agregarlo
+    state.equipos.push(i.excel_obj);
+  } else if (i.tipo === "equipo_no_excel") {
+    // El equipo está en la app pero no en el Excel cargado → opcional eliminar.
+    // Política: marcar con flag, no eliminar para no perder historial. Aquí solo marcamos.
+    const eq = state.equipos.find(e => e._id === i.equipo_id);
+    if (eq) eq.Observacion = (eq.Observacion ? eq.Observacion + " · " : "") + "Ausente en última carga del Excel";
+  } else {
+    const eq = state.equipos.find(e => e._id === i.equipo_id);
+    if (!eq) return;
+    if (i.tipo === "identificacion" || i.tipo === "enu_baja") {
+      eq[i.campo] = i.excel;
+    } else if (i.tipo === "programacion") {
+      eq.programacion[i.campo] = i.excel;
+    } else if (i.tipo === "resultado") {
+      eq.resultado[i.campo] = eq.resultado[i.campo] || {};
+      eq.resultado[i.campo].r = i.excel;
+    } else if (i.tipo === "estado") {
+      eq.EstadoEquipo = i.excel;
+    }
+  }
+}
+
+/* ============================================================================
+   19. IMPORTAR Y EXPORTAR EXCEL
+   ============================================================================ */
+function importExcel(file) {
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const wb = XLSX.read(e.target.result, { type: "array" });
+      const sheetPMP = wb.Sheets["PMP_2026"] || wb.Sheets[Object.keys(wb.Sheets).find(n => /PMP/i.test(n))];
+      const sheetReg = wb.Sheets["Registro_MP-2026"] || wb.Sheets[Object.keys(wb.Sheets).find(n => /Registro/i.test(n))];
+      if (!sheetPMP) { toast("Hoja PMP_2026 no encontrada en el archivo", "error"); return; }
+      const pmpRows = XLSX.utils.sheet_to_json(sheetPMP, { defval: "" });
+      const regRows = sheetReg ? XLSX.utils.sheet_to_json(sheetReg, { defval: "", header: 1 }) : null;
+
+      processImport(pmpRows, regRows);
+      state.meta.lastImported = new Date().toISOString();
+      markDirty();
+      toast(`Maestro cargado: ${state.inconsistencias.filter(i=>i.estado==="pendiente").length} inconsistencias detectadas`, "success", 4500);
+      renderNav();
+      navigate("reconciliacion");
+    } catch (err) {
+      console.error(err);
+      toast("Error leyendo archivo: " + err.message, "error");
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function processImport(pmpRows, regRowsRaw) {
+  const incs = [];
+  // Mapeo de columnas esperadas (case-insensitive)
+  function col(row, ...names) {
+    for (const n of names) {
+      const k = Object.keys(row).find(k => k.toLowerCase() === n.toLowerCase());
+      if (k !== undefined) return row[k];
+    }
+    return "";
+  }
+  // Index equipos en la app por NInventario
+  const byInv = {};
+  state.equipos.forEach(e => { if (e.NInventario) byInv[String(e.NInventario).trim()] = e; });
+  const seenInv = new Set();
+
+  pmpRows.forEach((row, idx) => {
+    const inv = String(col(row, "N° Inventario", "N Inventario", "NInventario") || "").trim();
+    if (!inv) return; // slot vacío
+    seenInv.add(inv);
+    let eq = byInv[inv];
+    const fields = {
+      ID: col(row, "ID"),
+      NCarpeta: col(row, "N° Carpeta", "NCarpeta"),
+      NInventario: inv,
+      Equipo: col(row, "Equipo"),
+      Servicio: col(row, "Servicio"),
+      Unidad: col(row, "Unidad"),
+      Ubicacion: col(row, "Ubicación", "Ubicacion"),
+      Procedencia: col(row, "Procedencia"),
+      Marca: col(row, "Marca"),
+      Modelo: col(row, "Modelo"),
+      Serie: col(row, "Serie"),
+      AnoInstalacion: col(row, "Año Instalación", "Ano Instalacion", "AnoInstalacion"),
+      VidaUtilResidual: col(row, "Vida Útil Residual", "VidaUtilResidual"),
+      Clasificacion: col(row, "Clasificación", "Clasificacion"),
+      ENUBaja: col(row, "ENU/Baja", "ENUBaja"),
+      Observacion: col(row, "Observación", "Observacion"),
+      FrecuenciaMP: col(row, "Frecuencia MP", "FrecuenciaMP"),
+      ResponsableMP: col(row, "Responsable MP", "ResponsableMP"),
+    };
+    if (!eq) {
+      // Equipo no presente en app → propuesta de creación
+      const nuevo = {
+        _id: uid(),
+        ...fields,
+        EstadoEquipo: "Operativo",
+        EstadoAnterior: null, FechaEstado: null,
+        programacion: {}, resultado: {},
+      };
+      MESES.forEach(m => nuevo.programacion[m] = String(col(row, m)||"").trim().toUpperCase());
+      incs.push({
+        _id: uid(), tipo: "equipo_no_app",
+        campo: "Equipo nuevo",
+        equipo_id: nuevo._id, equipo_label: `${inv} · ${nuevo.Equipo}`,
+        app: "(no existe)", excel: `${inv} · ${nuevo.Equipo}`,
+        excel_obj: nuevo,
+        estado: "pendiente"
+      });
+      byInv[inv] = nuevo;
+    } else {
+      // comparar identificación
+      ["NCarpeta","Equipo","Servicio","Unidad","Ubicacion","Procedencia","Marca","Modelo","Serie","AnoInstalacion","VidaUtilResidual","Clasificacion","FrecuenciaMP","ResponsableMP"].forEach(k => {
+        if (String(eq[k]||"").trim() !== String(fields[k]||"").trim()) {
+          incs.push({
+            _id: uid(), tipo: "identificacion",
+            campo: k, equipo_id: eq._id,
+            app: eq[k], excel: fields[k], estado: "pendiente"
+          });
+        }
+      });
+      if (String(eq.ENUBaja||"").trim() !== String(fields.ENUBaja||"").trim()) {
+        incs.push({ _id: uid(), tipo: "enu_baja", campo: "ENUBaja", equipo_id: eq._id, app: eq.ENUBaja, excel: fields.ENUBaja, estado: "pendiente" });
+      }
+      // programación mensual
+      MESES.forEach(m => {
+        const v = String(col(row, m)||"").trim().toUpperCase();
+        if (String(eq.programacion[m]||"").trim().toUpperCase() !== v) {
+          incs.push({
+            _id: uid(), tipo: "programacion", campo: m, equipo_id: eq._id,
+            app: eq.programacion[m]||"", excel: v, estado: "pendiente"
+          });
+        }
+      });
+    }
+  });
+
+  // Equipos en app que no aparecen en el Excel
+  state.equipos.forEach(eq => {
+    if (eq.NInventario && !seenInv.has(String(eq.NInventario).trim())) {
+      incs.push({
+        _id: uid(), tipo: "equipo_no_excel",
+        campo: "Equipo ausente del Excel",
+        equipo_id: eq._id,
+        app: `${eq.NInventario} · ${eq.Equipo}`, excel: "(no presente)",
+        estado: "pendiente"
+      });
+    }
+  });
+
+  // Procesar Registro_MP-2026 (R por mes) si está disponible.
+  // Asumimos: fila 1 = nombres de mes (12 grupos), fila 2 = "P","R" alternados después de cols identificación.
+  if (regRowsRaw && regRowsRaw.length >= 3) {
+    const header1 = regRowsRaw[0];
+    const header2 = regRowsRaw[1];
+    // localizar columna de inventario en encabezado 2
+    let invCol = -1;
+    for (let i = 0; i < header2.length; i++) {
+      const h = String(header2[i]||header1[i]||"").toLowerCase();
+      if (h.includes("inventario")) { invCol = i; break; }
+    }
+    if (invCol === -1) {
+      // intentar en header1
+      for (let i = 0; i < header1.length; i++) {
+        if (String(header1[i]||"").toLowerCase().includes("inventario")) { invCol = i; break; }
+      }
+    }
+    // localizar columnas P|R de cada mes
+    const monthCols = {}; // m -> {p:idx, r:idx}
+    for (let i = 0; i < header1.length; i++) {
+      const h = String(header1[i]||"").trim();
+      const mIdx = MESES.findIndex(m => h.toLowerCase().startsWith(m.toLowerCase()));
+      if (mIdx >= 0) {
+        const m = MESES[mIdx];
+        monthCols[m] = monthCols[m] || {};
+        const sub = String(header2[i]||"").trim().toUpperCase();
+        if (sub === "P") monthCols[m].p = i;
+        else if (sub === "R") monthCols[m].r = i;
+      }
+    }
+    if (invCol >= 0) {
+      for (let r = 2; r < regRowsRaw.length; r++) {
+        const row = regRowsRaw[r];
+        const inv = String(row[invCol]||"").trim();
+        if (!inv) continue;
+        const eq = byInv[inv];
+        if (!eq) continue;
+        MESES.forEach(m => {
+          const mc = monthCols[m];
+          if (!mc || mc.r === undefined) return;
+          const excelR = String(row[mc.r]||"").trim();
+          const appR = String(eq.resultado[m]?.r||"").trim();
+          if (excelR !== appR) {
+            incs.push({
+              _id: uid(), tipo: "resultado", campo: m, equipo_id: eq._id,
+              app: appR, excel: excelR, estado: "pendiente"
+            });
+          }
+        });
+      }
+    }
+  }
+
+  // Mantener inconsistencias resueltas previas, agregar nuevas pendientes (deduplicar)
+  state.inconsistencias = state.inconsistencias.filter(i => i.estado !== "pendiente").concat(incs);
+}
+
+function exportExcel() {
+  const wb = XLSX.utils.book_new();
+
+  // Hoja PMP_2026
+  const headerPMP = ["ID","N° Carpeta","N° Inventario","Equipo","Servicio","Unidad","Ubicación","Procedencia","Marca","Modelo","Serie","Año Instalación","Vida Útil Residual","Clasificación","ENU/Baja","Observación","Frecuencia MP","Responsable MP", ...MESES];
+  const pmpData = [headerPMP];
+  state.equipos.forEach(eq => {
+    pmpData.push([
+      eq.ID, eq.NCarpeta, eq.NInventario, eq.Equipo, eq.Servicio, eq.Unidad, eq.Ubicacion, eq.Procedencia,
+      eq.Marca, eq.Modelo, eq.Serie, eq.AnoInstalacion, eq.VidaUtilResidual, eq.Clasificacion, eq.ENUBaja, eq.Observacion,
+      eq.FrecuenciaMP, eq.ResponsableMP,
+      ...MESES.map(m => eq.programacion[m] || "")
+    ]);
+  });
+  const wsPMP = XLSX.utils.aoa_to_sheet(pmpData);
+  XLSX.utils.book_append_sheet(wb, wsPMP, "PMP_2026");
+
+  // Hoja Registro_MP-2026 — encabezado de 2 filas (sin merges)
+  // Fila 1: identificación (1ª fila) | meses (replicado 2 veces para P y R) — el cliente puede merge manualmente si lo desea
+  // Fila 2: vacíos en identificación | "P", "R" alternados
+  const idHeaders = ["ID","N° Carpeta","N° Inventario","Equipo","Servicio","Unidad","Ubicación","Procedencia","Marca","Modelo","Serie","Año Instalación","Vida Útil Residual","Clasificación","ENU/Baja","Frecuencia MP","Responsable MP"];
+  const row1 = idHeaders.slice();
+  const row2 = idHeaders.map(()=>"");
+  MESES.forEach(m => { row1.push(m, ""); row2.push("P","R"); });
+  const regData = [row1, row2];
+  state.equipos.forEach(eq => {
+    const r = [eq.ID, eq.NCarpeta, eq.NInventario, eq.Equipo, eq.Servicio, eq.Unidad, eq.Ubicacion, eq.Procedencia,
+      eq.Marca, eq.Modelo, eq.Serie, eq.AnoInstalacion, eq.VidaUtilResidual, eq.Clasificacion, eq.ENUBaja,
+      eq.FrecuenciaMP, eq.ResponsableMP];
+    MESES.forEach(m => {
+      r.push(eq.programacion[m] || "");
+      r.push(eq.resultado[m]?.r || "");
+    });
+    regData.push(r);
+  });
+  const wsReg = XLSX.utils.aoa_to_sheet(regData);
+  // Merges visuales en la fila 1 para los meses
+  wsReg["!merges"] = wsReg["!merges"] || [];
+  MESES.forEach((m, i) => {
+    const col = idHeaders.length + i*2;
+    wsReg["!merges"].push({ s: { r: 0, c: col }, e: { r: 0, c: col+1 } });
+  });
+  XLSX.utils.book_append_sheet(wb, wsReg, "Registro_MP-2026");
+
+  const fname = `ProgramaciónMP_2026_export_${today()}.xlsx`;
+  XLSX.writeFile(wb, fname);
+  toast("Maestro exportado: " + fname, "success");
+}
+
+/* ============================================================================
+   20. INICIALIZACIÓN
+   ============================================================================ */
+function bindGlobalUI() {
+  $("#btn-import").addEventListener("click", () => $("#file-input").click());
+  $("#file-input").addEventListener("change", (e) => {
+    if (e.target.files[0]) importExcel(e.target.files[0]);
+    e.target.value = "";
+  });
+  $("#btn-export").addEventListener("click", exportExcel);
+
+  $("#btn-export-json").addEventListener("click", () => {
+    const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `respaldo_sec_${today()}.json`; a.click();
+    URL.revokeObjectURL(url);
+    toast("Respaldo JSON descargado", "success");
+  });
+
+  $("#btn-reset").addEventListener("click", () => {
+    if (!confirm("Esto borrará TODOS los datos locales (equipos, pendientes, correctivos, etc.). ¿Continuar?")) return;
+    if (!confirm("Última confirmación: ¿realmente desea hacer RESET?")) return;
+    localStorage.removeItem(STORAGE_KEY);
+    state = { equipos: [], envios_st: [], correctivos: [], pendientes: [], inconsistencias: [], meta: { lastSaved: null, lastImported: null, ano: 2026 } };
+    seedData();
+    save();
+    navigate("inicio");
+    renderNav();
+    toast("Datos restablecidos a ejemplo inicial", "success");
+  });
+
+  $("#btn-dark").addEventListener("click", () => {
+    document.body.classList.toggle("dark");
+  });
+
+  // Atajos de teclado
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape") {
+      closeFilterPopup();
+      if (modalStack.length) closeModal();
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      save();
+      toast("Guardado manual", "success", 1200);
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+      if (currentView === "inventario") {
+        e.preventDefault();
+        const s = $("#inv-search");
+        if (s) { s.focus(); s.select(); }
+      }
+    }
+  });
+}
+
+function init() {
+  const loaded = load();
+  if (!loaded || !state.equipos || state.equipos.length === 0) {
+    seedData();
+    save();
+  }
+  bindGlobalUI();
+  renderNav();
+  navigate("inicio");
+}
+
+init();
+</script>
+</body>
+</html>
