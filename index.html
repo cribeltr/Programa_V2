@@ -684,7 +684,7 @@ function toast(msg, type="info", ms=2800) {
 /* ============================================================================
    2. MODELO DE DATOS Y PERSISTENCIA
    ============================================================================ */
-const STORAGE_KEY = "sec_hhha_mp_v1";
+const STORAGE_KEY = "sec_hhha_mp_v2";
 let state = {
   equipos: [],         // { _id, ID, NCarpeta, NInventario, Equipo, Servicio, Unidad, Ubicacion, Procedencia, Marca, Modelo, Serie, AnoInstalacion, VidaUtilResidual, Clasificacion, ENUBaja, Observacion, FrecuenciaMP, ResponsableMP, EstadoEquipo, EstadoAnterior, FechaEstado, programacion:{Ene:..}, resultado:{Ene:{p,r,fecha,ejecutor,estado,obs}} }
   envios_st: [],       // { _id, equipo_id, n_envio, fecha_envio, solicitud, ejecutor_externo, responsable_interno, fecha_reintegro }
@@ -736,205 +736,8 @@ function load() {
 }
 
 /* ============================================================================
-   3. DATOS DE EJEMPLO PRECARGADOS
+   3. UTIL DE FECHAS (datos de demo eliminados — la app inicia vacía)
    ============================================================================ */
-function seedData() {
-  const familias = [
-    { equipo: "Monitor multiparámetro", marca: "Mindray", modelos: ["uMEC15","BeneView T5","ePM 10"], freq: 6 },
-    { equipo: "Ventilador mecánico", marca: "Hamilton", modelos: ["G5","C3","T1"], freq: 4 },
-    { equipo: "Desfibrilador", marca: "Philips", modelos: ["HeartStart XL+","Tempus Pro"], freq: 6 },
-    { equipo: "Máquina de anestesia", marca: "Dräger", modelos: ["Fabius Plus","Atlan A350"], freq: 4 },
-    { equipo: "Incubadora neonatal", marca: "GE Healthcare", modelos: ["Giraffe OmniBed","Lullaby"], freq: 6 },
-    { equipo: "Máquina de diálisis", marca: "Fresenius", modelos: ["4008S","5008"], freq: 3 },
-  ];
-  const servicios = ["UCI Adulto","UCI Pediátrica","Pabellón","Urgencias","Neonatología","Medicina Interna","Cardiología","Hemodiálisis"];
-  const unidades = ["Sala 1","Sala 2","Pabellón A","Pabellón B","Box 1","Box 2","Cuna 1","Cuna 2","Puesto 1","Puesto 2"];
-
-  let counter = 1;
-  const equipos = [];
-  familias.forEach((f, fi) => {
-    const n = 5; // ~30 equipos
-    for (let i=0; i<n; i++) {
-      const modelo = f.modelos[i % f.modelos.length];
-      const servicio = servicios[(fi*2 + i) % servicios.length];
-      const eq = {
-        _id: uid(),
-        ID: counter,
-        NCarpeta: "C-" + String(2000 + counter),
-        NInventario: "INV-" + String(10000 + counter),
-        Equipo: f.equipo,
-        Servicio: servicio,
-        Unidad: unidades[(fi+i) % unidades.length],
-        Ubicacion: servicio + " · " + unidades[(fi+i) % unidades.length],
-        Procedencia: i % 3 === 0 ? "MINSAL" : "Hospital",
-        Marca: f.marca,
-        Modelo: modelo,
-        Serie: f.marca.slice(0,3).toUpperCase() + "-" + String(50000 + counter*7),
-        AnoInstalacion: 2018 + (counter % 7),
-        VidaUtilResidual: String(10 - (counter % 8)) + " años",
-        Clasificacion: i % 2 === 0 ? "Crítico" : "No crítico",
-        ENUBaja: "",
-        Observacion: "",
-        FrecuenciaMP: f.freq + " meses",
-        ResponsableMP: RESPONSABLES[counter % RESPONSABLES.length],
-        EstadoEquipo: "Operativo",
-        EstadoAnterior: null,
-        FechaEstado: null,
-        programacion: {},
-        resultado: {},
-      };
-      // Programación: cada `freq` meses
-      const offset = i % f.freq;
-      for (let m=0; m<12; m++) {
-        eq.programacion[MESES[m]] = ((m + offset) % f.freq === 0) ? "X" : "";
-      }
-      equipos.push(eq);
-      counter++;
-    }
-  });
-
-  // Cargar algunos resultados ya registrados (Ene, Feb, Mar, Abr)
-  equipos.forEach((eq, idx) => {
-    ["Ene","Feb","Mar","Abr"].forEach(m => {
-      if (eq.programacion[m] === "X") {
-        // Mayoría Si, algunos C2 / C5 / FS
-        let resultado = "Si";
-        if (idx % 11 === 3) resultado = "C2";
-        else if (idx % 13 === 5) resultado = "C5";
-        else if (idx % 17 === 7) resultado = "FS";
-        eq.resultado[m] = {
-          p: "X",
-          r: resultado,
-          fecha: "2026-0" + (MESES.indexOf(m)+1) + "-" + String(10 + (idx % 18)).padStart(2,"0"),
-          ejecutor: eq.ResponsableMP,
-          estado: resultado === "Si" ? "Operativo" : (resultado === "C2" ? "Servicio técnico" : "No operativo"),
-          obs: resultado === "Si" ? "MP completado sin novedades" : "",
-        };
-      }
-    });
-  });
-
-  // 2 equipos en ST y 2 no operativos
-  equipos[2].EstadoEquipo = "Servicio técnico";
-  equipos[2].FechaEstado = "2026-03-15";
-  equipos[2].EstadoAnterior = "Operativo";
-  equipos[8].EstadoEquipo = "Servicio técnico";
-  equipos[8].FechaEstado = "2026-04-22";
-  equipos[8].EstadoAnterior = "Operativo";
-  equipos[14].EstadoEquipo = "No operativo";
-  equipos[14].FechaEstado = "2026-04-02";
-  equipos[20].EstadoEquipo = "No operativo";
-  equipos[20].FechaEstado = "2026-05-01";
-
-  const envios_st = [
-    {
-      _id: uid(), equipo_id: equipos[2]._id,
-      n_envio: "ST-2026-0014", fecha_envio: "2026-03-15",
-      solicitud: "ST-014-2026", ejecutor_externo: "Servicio Técnico Mindray Chile",
-      responsable_interno: "Cristián Beltrán Oviedo", fecha_reintegro: null
-    },
-    {
-      _id: uid(), equipo_id: equipos[8]._id,
-      n_envio: "ST-2026-0021", fecha_envio: "2026-04-22",
-      solicitud: "ST-021-2026", ejecutor_externo: "Dräger Service",
-      responsable_interno: "Macarena Toledo", fecha_reintegro: null
-    },
-  ];
-
-  const correctivos = [
-    {
-      _id: uid(), equipo_id: equipos[5]._id,
-      fecha: "2026-02-18", ejecutor: "Daniel Díaz Neira",
-      falla: "Alarma de presión sin causa aparente",
-      accion: "Limpieza de sensor de presión y recalibración",
-      repuestos: "—",
-      estado_final: "Operativo",
-      observaciones: "Se solicita seguimiento en próxima MP"
-    },
-    {
-      _id: uid(), equipo_id: equipos[14]._id,
-      fecha: "2026-04-02", ejecutor: "Ignacio Berner Bergara",
-      falla: "Pantalla con líneas verticales",
-      accion: "Diagnóstico de placa LCD; requiere repuesto importado",
-      repuestos: "Display LCD (pendiente)",
-      estado_final: "No operativo",
-      observaciones: "Equipo retirado de servicio hasta arribo de repuesto."
-    },
-  ];
-
-  const pendientes = [
-    {
-      _id: uid(),
-      titulo: "Solicitar cotización repuesto sensor SpO2",
-      descripcion: "Para 4 monitores Mindray del servicio de UCI.",
-      fecha_compromiso: addDaysStr(today(), 2),
-      prioridad: "Alta",
-      responsable: "Cristián Beltrán Oviedo",
-      equipo_id: equipos[0]._id,
-      estado: "En curso",
-      tareas: [
-        { id: uid(), texto: "Pedir RFQ a 3 proveedores", done: true },
-        { id: uid(), texto: "Comparar cotizaciones", done: false },
-        { id: uid(), texto: "Emitir OC", done: false },
-      ],
-      bitacora: [
-        { ts: "2026-05-15T10:30:00Z", texto: "Solicitado RFQ a Mindray Chile y Equimédica." },
-      ],
-      creado: "2026-05-12T09:00:00Z"
-    },
-    {
-      _id: uid(),
-      titulo: "Seguimiento ST equipo INV-10003",
-      descripcion: "Llevamos más de 60 días con el equipo en servicio técnico externo.",
-      fecha_compromiso: addDaysStr(today(), -3),
-      prioridad: "Alta",
-      responsable: "Cristián Beltrán Oviedo",
-      equipo_id: equipos[2]._id,
-      estado: "Abierto",
-      tareas: [
-        { id: uid(), texto: "Llamar al proveedor", done: false },
-        { id: uid(), texto: "Solicitar informe de estado", done: false }
-      ],
-      bitacora: [],
-      creado: "2026-05-10T12:00:00Z"
-    },
-    {
-      _id: uid(),
-      titulo: "Coordinar capacitación uso de ventiladores G5",
-      descripcion: "Personal de UCI Adulto solicita refrescamiento.",
-      fecha_compromiso: addDaysStr(today(), 12),
-      prioridad: "Media",
-      responsable: "Macarena Toledo",
-      equipo_id: null,
-      estado: "Abierto",
-      tareas: [],
-      bitacora: [],
-      creado: today() + "T08:00:00Z"
-    },
-    {
-      _id: uid(),
-      titulo: "Actualizar inventario tras compras Q1",
-      descripcion: "Ingresar nuevos monitores recibidos en marzo (puesta en marcha).",
-      fecha_compromiso: addDaysStr(today(), 6),
-      prioridad: "Baja",
-      responsable: "Cristián Beltrán Oviedo",
-      equipo_id: null,
-      estado: "Abierto",
-      tareas: [
-        { id: uid(), texto: "Etiquetar equipos", done: false },
-        { id: uid(), texto: "Ingresar series y modelos", done: false },
-      ],
-      bitacora: [],
-      creado: today() + "T08:00:00Z"
-    },
-  ];
-
-  state.equipos = equipos;
-  state.envios_st = envios_st;
-  state.correctivos = correctivos;
-  state.pendientes = pendientes;
-}
-
 function addDaysStr(s, n) {
   const d = new Date(s + "T00:00:00");
   d.setDate(d.getDate() + n);
@@ -2864,11 +2667,10 @@ function bindGlobalUI() {
     if (!confirm("Última confirmación: ¿realmente desea hacer RESET?")) return;
     localStorage.removeItem(STORAGE_KEY);
     state = { equipos: [], envios_st: [], correctivos: [], pendientes: [], inconsistencias: [], meta: { lastSaved: null, lastImported: null, ano: 2026 } };
-    seedData();
     save();
     navigate("inicio");
     renderNav();
-    toast("Datos restablecidos a ejemplo inicial", "success");
+    toast("Datos eliminados. Cargue el archivo maestro para comenzar.", "success");
   });
 
   $("#btn-dark").addEventListener("click", () => {
@@ -2897,11 +2699,7 @@ function bindGlobalUI() {
 }
 
 function init() {
-  const loaded = load();
-  if (!loaded || !state.equipos || state.equipos.length === 0) {
-    seedData();
-    save();
-  }
+  load();
   bindGlobalUI();
   renderNav();
   navigate("inicio");
